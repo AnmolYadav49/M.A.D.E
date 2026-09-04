@@ -60,6 +60,8 @@ export const PHASE_META = {
   complete: { node: 5, status: 'COMPLETE', color: 'var(--ok)', anim: 'none', complete: true },
   error: { node: -1, status: 'ERROR', color: 'var(--err)', anim: 'none' },
   rejected: { node: -1, status: 'REJECTED', color: 'var(--err)', anim: 'none' },
+  blocked: { node: 3, status: 'POLICY BLOCK', color: 'var(--err)', anim: 'none', error: true },
+  exhausted: { node: 2, status: 'HEAL EXHAUSTED', color: 'var(--err)', anim: 'none', error: true },
 };
 
 export function computeNodes(phase) {

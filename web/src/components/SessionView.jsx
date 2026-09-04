@@ -207,17 +207,69 @@ export default function SessionView({ visible, pipeline }) {
       </div>
 
       <div style={{ display: showWork ? 'flex' : 'none', flexDirection: 'column', gap: 14, marginTop: 8 }}>
+        {(state.phase === 'blocked' || state.phase === 'exhausted') && (
+          <div data-reveal="1" style={{ display: 'flex', alignItems: 'center', gap: 12, border: '1px solid var(--err)', background: 'rgba(224,74,60,.08)', color: 'var(--err)', padding: '14px 18px', fontFamily: "'JetBrains Mono',monospace", fontSize: 12 }}>
+            <span className="mi" style={{ fontSize: 20 }}>{state.phase === 'blocked' ? 'gpp_bad' : 'block'}</span>
+            <div>
+              <div style={{ textTransform: 'uppercase', letterSpacing: '.08em', marginBottom: 4 }}>
+                {state.phase === 'blocked' ? 'AST audit refused this code' : `Self-heal exhausted after ${state.healAttempts} attempts`}
+              </div>
+              <div style={{ color: 'var(--dim2)', fontSize: 11 }}>
+                Failure class: <span style={{ color: 'var(--err)' }}>{state.failureClass}</span> · No approval bar will appear. Reset the session to try a different task.
+              </div>
+            </div>
+          </div>
+        )}
+
+        {state.researchSources && state.researchSources.length > 0 && (
+          <div data-reveal="1" style={{ border: '1px solid var(--border)', background: 'var(--panel)', padding: 16, display: 'flex', flexDirection: 'column', gap: 10 }}>
+            <div style={{ fontFamily: "'JetBrains Mono',monospace", fontSize: 10, letterSpacing: '.06em', textTransform: 'uppercase', color: 'var(--dim3)', display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span className="mi" style={{ fontSize: 14, color: 'var(--accent)' }}>library_books</span>
+              Grounded in {state.researchSources.length} FAISS methodology docs
+            </div>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+              {state.researchSources.map((r, i) => (
+                <span key={i} title={r.snippet} style={{ fontFamily: "'JetBrains Mono',monospace", fontSize: 11, color: 'var(--accent)', border: '1px solid var(--primary)', padding: '3px 10px', borderRadius: 999, background: 'rgba(176,87,48,.08)' }}>
+                  {r.title}
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
+
         <h3 data-reveal="1" style={{ fontFamily: "'Bodoni Moda',serif", fontSize: 22, borderBottom: '1px solid var(--border)', paddingBottom: 10 }}>Security Audit</h3>
         <div style={{ border: '1px solid var(--border)' }}>
-          <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 16, padding: '12px 16px', background: 'var(--panel)', fontFamily: "'JetBrains Mono',monospace", fontSize: 10, letterSpacing: '.06em', textTransform: 'uppercase', color: 'var(--dim3)' }}>
-            <div>Check</div><div style={{ textAlign: 'right' }}>Status</div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1.6fr 3fr 0.5fr 1fr', gap: 16, padding: '12px 16px', background: 'var(--panel)', fontFamily: "'JetBrains Mono',monospace", fontSize: 10, letterSpacing: '.06em', textTransform: 'uppercase', color: 'var(--dim3)' }}>
+            <div>Check</div><div>Detail</div><div>Line</div><div style={{ textAlign: 'right' }}>Verdict</div>
           </div>
-          <AuditRow label="Sandbox Execution" detail={state.selfHealed ? 'Failed first attempt (OOM/error) · self-healed and re-verified' : 'Clean on first attempt · isolated subprocess'} pass={state.phase !== 'error' && !isIdle} />
-          <AuditRow label="Human Authorization" detail={state.phase === 'complete' ? 'Approved and executed' : state.phase === 'rejected' ? 'Rejected · workspace cleared' : 'Awaiting operator sign-off'} pass={state.phase === 'complete'} pending={state.phase === 'awaiting_hitl' || state.phase === 'running_subprocess'} />
+
+          {/* Real deterministic AST audit rows from graph.reviewer_node — these come straight from security.py, not LLM prose. */}
+          {state.securityAudit && state.securityAudit.findings.map((f, i) => (
+            <AuditRow key={`ast-${i}`} label={f.check} detail={f.detail} line={f.line} severity={f.severity} />
+          ))}
+
+          {/* Runtime rows (not part of the AST audit but part of the pipeline's guardrails). */}
+          <AuditRow
+            label="Sandbox Execution"
+            detail={state.failureClass === 'exhausted'
+              ? `Failed ${state.healAttempts} attempts (${state.failureClass}) — no clean run`
+              : state.selfHealed
+                ? `Failed first attempt (${state.failureClass || 'runtime'}) · self-healed and re-verified`
+                : (state.phase === 'awaiting_hitl' || state.phase === 'complete' || state.phase === 'running_subprocess')
+                  ? 'Clean on first attempt · isolated subprocess'
+                  : 'Not yet run'}
+            severity={state.phase === 'exhausted' || state.phase === 'error' ? 'block' : (state.phase === 'awaiting_hitl' || state.phase === 'complete' || state.phase === 'running_subprocess') ? 'pass' : 'warn'}
+          />
+          <AuditRow
+            label="Human Authorization"
+            detail={state.phase === 'complete' ? 'Approved and executed' : state.phase === 'rejected' ? 'Rejected · workspace cleared' : state.phase === 'awaiting_hitl' || state.phase === 'running_subprocess' ? 'Awaiting operator sign-off' : 'N/A — pipeline terminated before HITL gate'}
+            severity={state.phase === 'complete' ? 'pass' : state.phase === 'awaiting_hitl' || state.phase === 'running_subprocess' ? 'warn' : 'block'}
+          />
         </div>
+
         {state.reviewerReport && (
           <div data-reveal="1" style={{ border: '1px solid var(--border)', background: 'var(--panel)', padding: 16 }}>
-            <div style={{ fontFamily: "'JetBrains Mono',monospace", fontSize: 10, letterSpacing: '.06em', textTransform: 'uppercase', color: 'var(--dim3)', marginBottom: 8 }}>Reviewer Security Report</div>
+            <div style={{ fontFamily: "'JetBrains Mono',monospace", fontSize: 10, letterSpacing: '.06em', textTransform: 'uppercase', color: 'var(--dim3)', marginBottom: 8 }}>Reviewer Notes (deterministic verdict + LLM commentary)</div>
             <p style={{ fontSize: 13, lineHeight: 1.7, color: 'var(--dim1)', whiteSpace: 'pre-wrap' }}>{state.reviewerReport}</p>
           </div>
         )}
@@ -226,20 +278,22 @@ export default function SessionView({ visible, pipeline }) {
   );
 }
 
-function AuditRow({ label, detail, pass, pending }) {
-  const color = pending ? 'var(--warn)' : pass ? 'var(--primary)' : 'var(--err)';
-  const bg = pending ? 'rgba(224,179,65,.12)' : pass ? 'rgba(176,87,48,.12)' : 'rgba(224,74,60,.12)';
-  const icon = pending ? 'hourglass_empty' : pass ? 'check' : 'close';
-  const text = pending ? 'Pending' : pass ? 'Pass' : 'Fail';
+const SEVERITY = {
+  pass: { color: 'var(--ok)', bg: 'rgba(63,157,109,.12)', icon: 'check', text: 'Pass' },
+  warn: { color: 'var(--warn)', bg: 'rgba(224,179,65,.12)', icon: 'hourglass_empty', text: 'Pending' },
+  block: { color: 'var(--err)', bg: 'rgba(224,74,60,.12)', icon: 'block', text: 'Block' },
+};
+
+function AuditRow({ label, detail, line, severity }) {
+  const s = SEVERITY[severity] || SEVERITY.warn;
   return (
-    <div data-reveal="1" style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 16, padding: '13px 16px', borderTop: '1px solid var(--border)', alignItems: 'center' }}>
-      <div>
-        <div style={{ fontSize: 13 }}>{label}</div>
-        <div style={{ fontSize: 12, color: 'var(--dim2)', marginTop: 2 }}>{detail}</div>
-      </div>
+    <div data-reveal="1" style={{ display: 'grid', gridTemplateColumns: '1.6fr 3fr 0.5fr 1fr', gap: 16, padding: '13px 16px', borderTop: '1px solid var(--border)', alignItems: 'center' }}>
+      <div style={{ fontSize: 13 }}>{label}</div>
+      <div style={{ fontSize: 12, color: 'var(--dim2)' }}>{detail}</div>
+      <div style={{ fontFamily: "'JetBrains Mono',monospace", fontSize: 11, color: 'var(--dim3)' }}>{line ?? ''}</div>
       <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
-        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, border: `1px solid ${color}`, background: bg, color, fontFamily: "'JetBrains Mono',monospace", fontSize: 10, textTransform: 'uppercase', padding: '3px 8px' }}>
-          <span className="mi" style={{ fontSize: 12 }}>{icon}</span>{text}
+        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, border: `1px solid ${s.color}`, background: s.bg, color: s.color, fontFamily: "'JetBrains Mono',monospace", fontSize: 10, textTransform: 'uppercase', padding: '3px 8px' }}>
+          <span className="mi" style={{ fontSize: 12 }}>{s.icon}</span>{s.text}
         </span>
       </div>
     </div>

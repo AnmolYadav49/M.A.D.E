@@ -1,9 +1,20 @@
 langchain
-fastapi
 langchain_community
 langchain-openai
 langchain-groq
+langchain-google-genai
 langgraph
 python-dotenv
-langchain-google-genai
+fastapi
 uvicorn
+# Real RAG: FAISS index + local HuggingFace embedding model
+faiss-cpu
+sentence-transformers
+# Optional data-science libraries the AST allowlist accepts and the Coder is
+# instructed to use — pin here so `pip install -r requirements.txt` in a
+# fresh env is enough to run the demo prompts (Sieve/CSV/dice/sympy).
+numpy
+pandas
+sympy
+scipy
+scikit-learn
