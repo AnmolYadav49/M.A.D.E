@@ -1,0 +1,46 @@
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body, #root { height: 100%; }
+
+body {
+  background: var(--bg, #121212);
+  color: var(--fg, #fff);
+  font-family: 'Inter', sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+a { color: #D97757; text-decoration: none; }
+a:hover { color: #e79878; }
+
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #333; border-radius: 3px; }
+
+@keyframes nodePulse { 0%, 100% { box-shadow: 0 0 0 0 rgba(255,255,255,0); } 50% { box-shadow: 0 0 0 6px var(--glow); } }
+@keyframes healPulse { 0%, 100% { box-shadow: 0 0 0 0 rgba(176,87,48,0); } 50% { box-shadow: 0 0 0 7px rgba(176,87,48,.18); } }
+@keyframes errPulse { 0%, 100% { box-shadow: 0 0 0 0 rgba(224,74,60,0); } 50% { box-shadow: 0 0 0 7px rgba(224,74,60,.18); } }
+@keyframes fadeUp { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: .25; } }
+@keyframes dash { to { stroke-dashoffset: -16; } }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.mi {
+  font-family: 'Material Symbols Outlined';
+  font-weight: 400;
+  font-style: normal;
+  line-height: 1;
+  letter-spacing: normal;
+  text-transform: none;
+  display: inline-block;
+  white-space: nowrap;
+  direction: ltr;
+  -webkit-font-feature-settings: 'liga';
+  font-feature-settings: 'liga';
+}
+
+.theming * {
+  transition: background-color .5s ease, color .45s ease, border-color .5s ease, fill .5s ease, stroke .5s ease !important;
+}
+
+button { font: inherit; }
+input { font: inherit; }
