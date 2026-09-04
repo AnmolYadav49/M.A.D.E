@@ -4,7 +4,17 @@ import { ROLE_STYLE } from '../lib/roles';
 import { diffLines, plainLines } from '../lib/diff';
 
 const IDLE_PHASES = new Set(['idle', 'rejected']);
-const DEFAULT_TASK_HINT = 'e.g. Backfill missing embeddings for 2,000,000 support tickets into the vector store';
+const DEFAULT_TASK_HINT = 'Describe a data task, or pick a demo prompt below';
+
+// Preset prompts a judge can click to see the pipeline actually run. Picked to
+// (a) be tiny enough to complete inside the sandbox's 10s timeout, (b) not need
+// network egress (which the sandbox blocks), and (c) show visibly different
+// output styles in the session log / code diff.
+const DEMO_PROMPTS = [
+  { icon: 'calculate', label: 'Primes to 200 (Sieve of Eratosthenes)', task: 'Write Python that computes every prime number up to 200 using the Sieve of Eratosthenes and prints them, comma-separated, on one line.' },
+  { icon: 'table_view', label: 'Summarize mock_data.csv', task: 'Read the file mock_data.csv from the current working directory, print the header row, then print the total row count and the first 5 data rows.' },
+  { icon: 'casino', label: 'Roll two dice 1000 times', task: 'Simulate rolling two six-sided dice 1000 times, then print a plain-text histogram of the sum distribution (2 through 12), one row per sum, using # characters as bars.' },
+];
 
 export default function SessionView({ visible, pipeline }) {
   const { state, dispatch, approve, reject, reset } = pipeline;
@@ -22,6 +32,12 @@ export default function SessionView({ visible, pipeline }) {
     if (!text || state.running) return;
     dispatch(text);
     setDraft('');
+  };
+
+  const runPreset = (task) => {
+    if (state.running) return;
+    setDraft(task);
+    dispatch(task);
   };
 
   return (
@@ -73,9 +89,39 @@ export default function SessionView({ visible, pipeline }) {
         <span className="mi" style={{ fontSize: 44, color: 'var(--dim5)' }}>rocket_launch</span>
         <div style={{ textAlign: 'center' }}>
           <div style={{ fontFamily: "'Bodoni Moda',serif", fontSize: 22, marginBottom: 6 }}>Pipeline idle</div>
-          <p style={{ fontSize: 13, color: 'var(--dim3)', maxWidth: 420, lineHeight: 1.6 }}>The Researcher → Coder → Sandbox → Reviewer → Gate graph is armed. Describe a data task to watch the agents work in real time.</p>
+          <p style={{ fontSize: 13, color: 'var(--dim3)', maxWidth: 420, lineHeight: 1.6 }}>The Researcher → Coder → Sandbox → Reviewer → Gate graph is armed. Describe a data task, or pick a ready-made one below to watch the agents work.</p>
         </div>
-        <div style={{ display: 'flex', gap: 8, width: '100%', maxWidth: 480 }}>
+
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 12, alignItems: 'center' }}>
+          <div style={{ fontFamily: "'JetBrains Mono',monospace", fontSize: 10, letterSpacing: '.14em', textTransform: 'uppercase', color: 'var(--dim3)' }}>
+            Try a demo prompt
+          </div>
+          <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', justifyContent: 'center', maxWidth: 720 }}>
+            {DEMO_PROMPTS.map((p, i) => (
+              <button
+                key={p.label}
+                className="demo-chip"
+                onClick={() => runPreset(p.task)}
+                title={p.task}
+                style={{
+                  display: 'inline-flex', alignItems: 'center', gap: 8,
+                  padding: '9px 16px', background: 'rgba(176,87,48,.08)',
+                  border: '1px solid var(--primary)', color: 'var(--accent)',
+                  borderRadius: 999, cursor: 'pointer',
+                  fontFamily: "'JetBrains Mono',monospace", fontSize: 11,
+                  letterSpacing: '.04em', textTransform: 'uppercase',
+                  animation: 'chipIn .6s cubic-bezier(.34,1.56,.64,1) both',
+                  animationDelay: `${0.15 + i * 0.09}s`,
+                  transition: 'background .2s ease, transform .2s ease, box-shadow .2s ease, color .2s ease',
+                }}
+              >
+                <span className="mi" style={{ fontSize: 15 }}>{p.icon}</span>{p.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div style={{ display: 'flex', gap: 8, width: '100%', maxWidth: 480, marginTop: 6 }}>
           <input
             value={draft}
             onChange={(e) => setDraft(e.target.value)}

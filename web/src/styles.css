@@ -23,6 +23,37 @@ a:hover { color: #e79878; }
 @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: .25; } }
 @keyframes dash { to { stroke-dashoffset: -16; } }
 @keyframes spin { to { transform: rotate(360deg); } }
+@keyframes chipIn {
+  0% { opacity: 0; transform: translateY(12px) scale(.85); }
+  60% { opacity: 1; transform: translateY(-2px) scale(1.03); }
+  100% { opacity: 1; transform: translateY(0) scale(1); }
+}
+@keyframes chipShimmer {
+  0% { background-position: -160% 0; }
+  100% { background-position: 260% 0; }
+}
+
+.demo-chip {
+  position: relative;
+  overflow: hidden;
+}
+.demo-chip:hover {
+  background: rgba(176, 87, 48, 0.22) !important;
+  color: var(--fg) !important;
+  transform: translateY(-2px);
+  box-shadow: 0 6px 18px rgba(176, 87, 48, .25);
+}
+.demo-chip:active { transform: translateY(0) scale(.97); }
+.demo-chip::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(100deg, transparent 30%, rgba(255,255,255,.18) 50%, transparent 70%);
+  background-size: 200% 100%;
+  background-position: -160% 0;
+  pointer-events: none;
+  animation: chipShimmer 4.5s ease-in-out infinite;
+}
 
 .mi {
   font-family: 'Material Symbols Outlined';
