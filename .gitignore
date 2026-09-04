@@ -1,0 +1,13 @@
+# Environments
+.env
+__pycache__/
+
+# Vector Databases
+faiss_index/
+
+# AI Generated Execution Workspaces
+generated_workspace/
+
+# Python Virtual Environments (if you ever use one locally)
+venv/
+.venv/
