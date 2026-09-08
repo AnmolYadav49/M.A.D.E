@@ -128,7 +128,7 @@ def _load_retriever():
     return _retriever
 
 
-def researcher_node(state: MADEState) -> dict[str, Any]:
+async def researcher_node(state: MADEState) -> dict[str, Any]:
     logging.info("--- 🔍 RESEARCHER AGENT: Analyzing prompt and gathering context ---")
 
     retriever = _load_retriever()
@@ -136,7 +136,7 @@ def researcher_node(state: MADEState) -> dict[str, Any]:
     context_block = ""
     if retriever is not None:
         try:
-            docs = retriever.invoke(state["task"])
+            docs = await retriever.ainvoke(state["task"])
             for d in docs:
                 sources.append({
                     "title": d.metadata.get("title", "(untitled)"),
@@ -155,7 +155,7 @@ def researcher_node(state: MADEState) -> dict[str, Any]:
         f"Keep it concise (a short paragraph — no code yet). Prefer the retrieved libraries when they fit.\n\n"
         f"TASK: {state['task']}"
     )
-    response = llm().invoke([HumanMessage(content=prompt)])
+    response = await llm().ainvoke([HumanMessage(content=prompt)])
     return {"research_context": response.content, "research_sources": sources}
 
 
@@ -171,7 +171,7 @@ _FAILURE_HINTS = {
 }
 
 
-def coder_node(state: MADEState) -> dict[str, Any]:
+async def coder_node(state: MADEState) -> dict[str, Any]:
     logging.info("--- 💻 CODER AGENT: Synthesizing Python code ---")
 
     error_traceback = state.get("error_traceback")
@@ -200,7 +200,7 @@ def coder_node(state: MADEState) -> dict[str, Any]:
             f"Return ONLY raw Python code (no markdown, no prose)."
         )
 
-    response = llm().invoke([HumanMessage(content=prompt)])
+    response = await llm().ainvoke([HumanMessage(content=prompt)])
 
     result: dict[str, Any] = {"generated_code": response.content}
     if error_traceback:
@@ -309,7 +309,7 @@ def _classify_failure(returncode: int, stderr: str, timed_out: bool = False) -> 
     return "runtime"
 
 
-def sandbox_executor_node(state: MADEState) -> dict[str, Any]:
+async def sandbox_executor_node(state: MADEState) -> dict[str, Any]:
     # Execution kill-switch. On a public deployment the default is OFF, because
     # no amount of static analysis makes running a stranger's generated Python
     # on your own host safe. The rest of the pipeline is unaffected: the code
@@ -359,7 +359,7 @@ def sandbox_executor_node(state: MADEState) -> dict[str, Any]:
 
 # --------------------------- Policy gate (pre-execution) ----------------------
 
-def audit_node(state: MADEState) -> dict[str, Any]:
+async def audit_node(state: MADEState) -> dict[str, Any]:
     """Static policy gate. Runs BEFORE the sandbox, never after.
 
     This node exists because of a real ordering defect: the AST audit used to
@@ -401,7 +401,7 @@ def route_after_audit(state: MADEState) -> str:
     return "coder"
 
 
-def blocked_node(state: MADEState) -> dict[str, Any]:
+async def blocked_node(state: MADEState) -> dict[str, Any]:
     """Terminal node for code the policy gate refused and the Coder could not fix."""
     return {
         "failure_class": "policy",
@@ -415,7 +415,7 @@ def blocked_node(state: MADEState) -> dict[str, Any]:
 
 # --------------------------- Reviewer -----------------------------------------
 
-def reviewer_node(state: MADEState) -> dict[str, Any]:
+async def reviewer_node(state: MADEState) -> dict[str, Any]:
     """LLM commentary on top of the already-passed static audit.
 
     By the time the graph reaches here the policy gate has already approved the
@@ -437,7 +437,7 @@ def reviewer_node(state: MADEState) -> dict[str, Any]:
         f"Be brief (3–5 sentences).\n\nCODE:\n{clean_code}"
     )
     try:
-        llm_notes = llm().invoke([HumanMessage(content=prompt)]).content
+        llm_notes = (await llm().ainvoke([HumanMessage(content=prompt)])).content
     except Exception as e:
         llm_notes = f"(LLM commentary unavailable: {e})"
 
@@ -463,7 +463,7 @@ def route_after_execution(state: MADEState) -> str:
     return "coder"
 
 
-def exhausted_node(state: MADEState) -> dict[str, Any]:
+async def exhausted_node(state: MADEState) -> dict[str, Any]:
     """Terminal node reached when the self-heal loop hits its retry cap."""
     return {
         "failure_class": "exhausted",
