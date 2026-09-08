@@ -22,7 +22,14 @@ Run against a running server:
 """
 from __future__ import annotations
 
+import os
 import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from console import force_utf8  # noqa: E402
+
+force_utf8()
 
 WS_URL = "ws://127.0.0.1:8000/ws/logs?session=probe"
 

@@ -11,6 +11,12 @@ from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_core.documents import Document
 
+from console import force_utf8
+
+# The corpus entries use '·' separators and the progress output uses arrows,
+# neither of which a cp1252 Windows console can encode.
+force_utf8()
+
 CORPUS: list[dict] = [
     # --- Pandas: cleaning, aggregation, joins ------------------------------
     {"title": "Pandas · load a CSV", "text": "Use pd.read_csv('file.csv'). For large files, pass chunksize=N to iterate rows in batches instead of loading everything at once. dtype= can preallocate types."},

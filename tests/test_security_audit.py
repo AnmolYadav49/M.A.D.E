@@ -15,6 +15,10 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from console import force_utf8  # noqa: E402
+
+force_utf8()
+
 from security import analyze_code, PASS, BLOCK  # noqa: E402
 
 # (label, source, expected_verdict)

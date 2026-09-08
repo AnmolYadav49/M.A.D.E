@@ -14,10 +14,18 @@ Run from the repo root:  python tools/vendor_fonts.py
 """
 from __future__ import annotations
 
+import os
 import pathlib
 import re
 import sys
 import urllib.request
+
+# This lives in tools/, so the repo root is one level up.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from console import force_utf8  # noqa: E402
+
+force_utf8()
 
 UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 OUT_DIR = pathlib.Path("web/public/fonts")

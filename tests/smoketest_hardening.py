@@ -22,6 +22,11 @@ import urllib.request
 import urllib.error
 import json
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from console import force_utf8  # noqa: E402
+
+force_utf8()
+
 BASE = "http://127.0.0.1:8000"
 API_KEY = "smoketest-key-987654321"
 

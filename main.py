@@ -16,10 +16,17 @@ from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 
 import config
+from console import force_utf8
 from runcontext import (
     current_llm_key, current_session_id,
     SessionStampFilter, SecretRedactingFilter, redact,
 )
+
+# The agent trace is full of emoji ("--- 🔍 RESEARCHER AGENT ..."). On a cp1252
+# Windows console the stderr log handler raises UnicodeEncodeError, which
+# `logging` catches and reports as a full "--- Logging error ---" traceback —
+# once per agent step. Do this before any handler is attached.
+force_utf8()
 from graph import made_app, sandbox_env, MissingLLMKey, sandbox_popen_kwargs, _truncate
 from security import analyze_code, strip_markdown_code_fence
 
@@ -179,7 +186,17 @@ async def startup_event():
     # with no browser attached a whole run produces nothing an operator can read
     # afterwards. Mirror it to stderr too.
     if not any(isinstance(h, logging.StreamHandler) for h in root.handlers):
-        stream_handler = logging.StreamHandler()
+        # force_utf8() above normally makes this moot, but a redirected or
+        # non-reconfigurable stream can still refuse a character. Belt and
+        # braces: degrade to '?' rather than let a log line take down the
+        # handler and print a traceback for every agent step.
+        stream = getattr(sys, "stderr", None)
+        if stream is not None and getattr(stream, "errors", None) not in (None, "replace", "backslashreplace"):
+            try:
+                stream.reconfigure(errors="replace")
+            except (AttributeError, ValueError, OSError):
+                pass
+        stream_handler = logging.StreamHandler(stream)
         stream_handler.setFormatter(logging.Formatter("[%(levelname)s] %(message)s"))
         stream_handler.addFilter(redact_filter)
         root.addHandler(stream_handler)

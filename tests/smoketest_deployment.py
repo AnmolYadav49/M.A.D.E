@@ -14,11 +14,18 @@ Run against a server started with:
 from __future__ import annotations
 
 import json
+import os
 import sys
 import threading
 import time
 import urllib.error
 import urllib.request
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from console import force_utf8  # noqa: E402
+
+force_utf8()
 
 BASE = "http://127.0.0.1:8000"
 

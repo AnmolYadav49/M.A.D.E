@@ -24,6 +24,10 @@ from unittest.mock import patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from console import force_utf8  # noqa: E402
+
+force_utf8()
+
 import graph  # noqa: E402
 
 
