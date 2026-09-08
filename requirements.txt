@@ -6,13 +6,22 @@ langchain-google-genai
 langgraph
 python-dotenv
 fastapi
-uvicorn
+
+# uvicorn[standard] rather than bare uvicorn: the [standard] extra is what
+# pulls in a WebSocket implementation. Without it uvicorn rejects the upgrade
+# on /ws/logs and the live pipeline tracker silently stops working — with no
+# build-time error to catch it. `websockets` currently arrives transitively via
+# langgraph-sdk/langsmith, but relying on someone else's transitive dependency
+# for a load-bearing feature is how this breaks six months from now.
+uvicorn[standard]
+
 # Real RAG: FAISS index + local HuggingFace embedding model
 faiss-cpu
 sentence-transformers
-# Optional data-science libraries the AST allowlist accepts and the Coder is
-# instructed to use — pin here so `pip install -r requirements.txt` in a
-# fresh env is enough to run the demo prompts (Sieve/CSV/dice/sympy).
+
+# Data-science libraries the AST allowlist accepts and the Coder is instructed
+# to use — pinned here so `pip install -r requirements.txt` in a fresh env is
+# enough to run the demo prompts (sieve, sympy integral, dice histogram).
 numpy
 pandas
 sympy

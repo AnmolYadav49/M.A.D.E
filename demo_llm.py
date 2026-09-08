@@ -226,7 +226,14 @@ class ScriptedLLM:
         scenario = self._scenario(prompt)
 
         if "Senior Data Science Researcher" in prompt:
-            logging.info("--- 🔍 (demo) scripted Researcher response ---")
+            # The Researcher is always the first node in a run, so this is the
+            # reliable signal that a new run has begun. Resetting here matters
+            # because ScriptedLLM is a process-wide singleton: without it the
+            # attempt counter carried across runs, so the second dispatch in a
+            # session skipped straight to the already-repaired code and the
+            # self-heal never appeared to happen.
+            self._coder_calls = 0
+            logging.info("--- 🔍 (demo) scripted Researcher response (run reset) ---")
             return _ScriptedResponse(scenario.research)
 
         if "Security & Code Reviewer" in prompt:

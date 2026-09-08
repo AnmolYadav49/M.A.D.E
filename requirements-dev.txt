@@ -1,0 +1,7 @@
+# Test-only dependencies. Not installed on the deployed service.
+#   pip install -r requirements.txt -r requirements-dev.txt
+-r requirements.txt
+
+# Used by tests/smoketest_deployment.py to assert that the /ws/logs stream is
+# scoped per session (i.e. that one visitor cannot read another's run).
+websockets
