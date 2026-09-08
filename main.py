@@ -40,15 +40,25 @@ if os.path.exists(frontend_dir):
 
 
 # --- WEBSOCKET LOGGING SETUP ---
-log_queue = None
+# `log_subscribers` holds one asyncio.Queue per connected websocket client so every
+# client gets every line (a single shared queue would round-robin lines across
+# clients instead of broadcasting them, starving whichever client didn't win the
+# race to `.get()` it).
+log_subscribers: set = set()
+
+def broadcast_log(message: str):
+    for queue in list(log_subscribers):
+        try:
+            queue.put_nowait(message)
+        except Exception:
+            pass
 
 class WebSocketLogHandler(logging.Handler):
     def emit(self, record):
-        if log_queue is not None:
-            try:
-                log_queue.put_nowait(self.format(record))
-            except Exception:
-                pass
+        try:
+            broadcast_log(self.format(record))
+        except Exception:
+            pass
 
 class WebSocketStream:
     def __init__(self, original_stream):
@@ -57,12 +67,12 @@ class WebSocketStream:
     def write(self, message):
         # 1. Print to the normal VS Code terminal
         self.original_stream.write(message)
-        
-        # 2. Clone it to the WebSocket queue
-        if message.strip() and log_queue is not None:
+
+        # 2. Clone it to every connected WebSocket
+        if message.strip():
             try:
                 # Prefix with [AGENT] for styling, or leave as raw message
-                log_queue.put_nowait(message.strip())
+                broadcast_log(message.strip())
             except Exception:
                 pass
 
@@ -71,15 +81,12 @@ class WebSocketStream:
 
 @app.on_event("startup")
 async def startup_event():
-    global log_queue
-    log_queue = asyncio.Queue()
-    
     # Hijack sys.stdout to mirror print statements to WebSocket
     sys.stdout = WebSocketStream(sys.stdout)
-    
+
     ws_handler = WebSocketLogHandler()
     ws_handler.setFormatter(logging.Formatter("[%(levelname)s] %(message)s"))
-    
+
     # Hijack Uvicorn's internal loggers and the root logger
     logging.getLogger("uvicorn.access").addHandler(ws_handler)
     logging.getLogger("uvicorn.error").addHandler(ws_handler)
@@ -90,15 +97,16 @@ async def startup_event():
 @app.websocket("/ws/logs")
 async def websocket_logs(websocket: WebSocket):
     await websocket.accept()
+    queue: asyncio.Queue = asyncio.Queue()
+    log_subscribers.add(queue)
     try:
         while True:
-            if log_queue is not None:
-                log_message = await log_queue.get()
-                await websocket.send_text(log_message)
-            else:
-                await asyncio.sleep(0.1)
+            log_message = await queue.get()
+            await websocket.send_text(log_message)
     except WebSocketDisconnect:
         pass
+    finally:
+        log_subscribers.discard(queue)
 
 
 # --- SCHEMAS ---
@@ -138,17 +146,23 @@ async def execute_task(request: TaskRequest):
             "reviewer_notes": "",
             "human_approved": False,
             "error_traceback": None,
-            "execution_output": None
+            "execution_output": None,
+            "prior_code": None,
+            "heal_error": None,
         }
-        
+
         # Trigger the Graph Asynchronously
         final_state = await made_app.ainvoke(initial_state)
-        
+
         # Return the payload to the user for HITL approval
+        prior_code = final_state.get("prior_code")
         return {
             "status": "Execution paused. Awaiting human approval.",
             "reviewer_security_report": final_state["reviewer_notes"],
-            "proposed_code": final_state["generated_code"]
+            "proposed_code": final_state["generated_code"],
+            "self_healed": bool(prior_code),
+            "prior_code": prior_code,
+            "heal_error": final_state.get("heal_error"),
         }
         
     except Exception as e:

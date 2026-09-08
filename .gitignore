@@ -11,3 +11,6 @@ generated_workspace/
 # Python Virtual Environments (if you ever use one locally)
 venv/
 .venv/
+
+# React/Vite frontend source build tooling — frontend/ (its build output) is tracked
+web/node_modules/

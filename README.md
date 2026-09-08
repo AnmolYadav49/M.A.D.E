@@ -29,4 +29,25 @@
 ├── state.py            # TypedDict defining the shared agent state tape[cite: 6]
 ├── requirements.txt    # Python dependencies[cite: 5]
 ├── .env                # Environment variables (OpenRouter API Keys)
-└── faiss_index/        # Local FAISS vector storage folder[cite: 1, 2]
+├── faiss_index/        # Local FAISS vector storage folder[cite: 1, 2]
+├── web/                 # React + Vite source for the control center UI
+└── frontend/            # Built UI output (served by main.py) — generated, do not hand-edit
+```
+
+---
+
+## 🖥️ Control Center UI
+
+The dashboard is a React app (source in `web/`) built with Vite and served by FastAPI as
+static files from `frontend/`. After changing anything under `web/src/`, rebuild:
+
+```bash
+cd web
+npm install   # first time only
+npm run build # writes frontend/index.html + frontend/assets/
+```
+
+`main.py` serves `frontend/index.html` at `/` and mounts `frontend/` at `/static` — no
+backend changes are needed after a rebuild. For iterative UI work, `npm run dev` inside
+`web/` starts a Vite dev server on port 5173 that proxies API/websocket calls to a
+FastAPI instance running on `127.0.0.1:8000` (see `web/vite.config.js`).

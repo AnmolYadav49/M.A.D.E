@@ -3,6 +3,7 @@ fastapi
 langchain_community
 langchain-openai
 langchain-groq
+langgraph
 python-dotenv
 langchain-google-genai
 uvicorn

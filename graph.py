@@ -47,9 +47,17 @@ def coder_node(state: MADEState):
             f"Use this methodology: {state.get('research_context', '')}. \n\n"
             f"Return ONLY raw, valid Python code. No markdown formatting."
         )
-    
+
     response = llm.invoke([HumanMessage(content=prompt)])
-    return {"generated_code": response.content} 
+
+    if error_traceback:
+        # self-heal pass: remember what came before so the frontend can render a real diff
+        return {
+            "generated_code": response.content,
+            "prior_code": state.get("generated_code", ""),
+            "heal_error": error_traceback,
+        }
+    return {"generated_code": response.content}
 
 def sandbox_executor_node(state: MADEState):
     logging.info("--- ⚡ SANDBOX EXECUTOR: Running isolated test execution ---")
