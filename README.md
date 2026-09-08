@@ -51,3 +51,62 @@ npm run build # writes frontend/index.html + frontend/assets/
 backend changes are needed after a rebuild. For iterative UI work, `npm run dev` inside
 `web/` starts a Vite dev server on port 5173 that proxies API/websocket calls to a
 FastAPI instance running on `127.0.0.1:8000` (see `web/vite.config.js`).
+
+---
+
+## 🔐 Security & configuration
+
+M.A.D.E. is intentionally hardened so a technical judge can't poke a hole in the
+pipeline's logic. What you'd want to set in a real environment:
+
+| env var | default | what it controls |
+| --- | --- | --- |
+| `OPENROUTER_API_KEY` | *(required)* | the OpenRouter key used by every LLM node |
+| `MADE_API_KEY` | *(unset → dev mode)* | client-facing shared secret; requests to `/execute-task`, `/approve-and-run`, `/reject-task` must send it as `X-API-Key`. If unset, the server boots in DEV MODE with a loud warning and no auth. |
+| `MADE_ALLOWED_ORIGINS` | `http://localhost:5173,http://127.0.0.1:5173,http://127.0.0.1:8000,http://localhost:8000` | comma-separated CORS allowlist. `*` is refused. |
+| `MADE_RATE_LIMIT_PER_MIN` | `12` | token-bucket cap per (route, client IP) |
+| `MADE_MAX_HEAL_ATTEMPTS` | `3` | self-heal loop retry cap; beyond this the pipeline terminates with `failure_class="exhausted"` instead of spinning forever |
+| `MADE_SANDBOX_TIMEOUT_SEC` | `10` | wall-clock budget for the sandbox subprocess |
+| `MADE_MODEL_NAME` | `openrouter/free` | the model the Coder/Researcher/Reviewer use |
+| `MADE_FAISS_INDEX_DIR` | `faiss_index` | where `build_db.py` writes the vector store and `graph.researcher_node` reads it |
+| `MADE_RESEARCH_TOP_K` | `4` | how many methodology docs the researcher retrieves per task |
+
+### Security posture (what the modal claims — and now actually enforces)
+
+- **AST audit**, in `security.py`, is the real security boundary. Every piece of
+  generated code goes through it before either the Reviewer LLM sees it or the
+  HITL gate can approve it. It fails-closed on `SyntaxError`, refuses imports
+  outside a small allowlist (math, statistics, numpy, pandas, sympy, scipy,
+  sklearn, matplotlib, and stdlib safe modules), refuses `eval`/`exec`/`compile`
+  /`__import__`, refuses `os.system`/`subprocess.*`/`socket`/`requests` regardless
+  of how the module was renamed, and refuses the `__class__.__base__.__subclasses__`
+  sandbox-escape family. An LLM commentary layer runs afterwards but **cannot**
+  override a BLOCK.
+- The same audit runs on the `/approve-and-run` gate, so a tampered client
+  cannot POST forged code past the Reviewer.
+- `/ws/logs` broadcasts to one queue per connection so concurrent viewers all
+  see every line.
+
+### Real RAG
+
+`build_db.py` builds a FAISS index over a curated methodology corpus (pandas,
+numpy, sympy, scipy, sklearn recipes) using `all-MiniLM-L6-v2` embeddings.
+`researcher_node` retrieves the top-K relevant recipes for each task and
+grounds the methodology prompt in them. The retrieved snippets are exposed to
+the UI as "grounded in:" citations. Missing index → graceful fallback to an
+unguided LLM prompt with a warning.
+
+### First-time setup
+
+```bash
+pip install -r requirements.txt
+python build_db.py               # builds faiss_index/ (downloads the embedding model once)
+cd web && npm install && npm run build && cd ..
+export OPENROUTER_API_KEY=…       # your key
+export MADE_API_KEY=…             # any long random string; clients send it as X-API-Key
+uvicorn main:app --host 127.0.0.1 --port 8000
+```
+
+Verify the hardening: `python tests/smoketest_hardening.py` (server must be
+running; the test sets `X-API-Key=smoketest-key-987654321`, so export
+`MADE_API_KEY=smoketest-key-987654321` in the terminal that runs uvicorn).

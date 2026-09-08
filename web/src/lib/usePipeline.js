@@ -20,7 +20,11 @@ const initialState = {
   priorCode: null,
   healError: null,
   selfHealed: false,
+  healAttempts: 0,
+  failureClass: null,
   reviewerReport: '',
+  securityAudit: null,       // { verdict, findings:[…] } from graph.reviewer_node
+  researchSources: [],       // [{ title, snippet }] from graph.researcher_node
   subprocessResult: null,
   errorMessage: null,
 };
@@ -83,22 +87,42 @@ export function usePipeline() {
       priorCode: null,
       healError: null,
       selfHealed: false,
+      healAttempts: 0,
+      failureClass: null,
       reviewerReport: '',
+      securityAudit: null,
+      researchSources: [],
       subprocessResult: null,
       errorMessage: null,
     }));
     try {
       const data = await executeTask(text);
+      // The graph terminated without a HITL handoff — either the AST audit
+      // blocked the code or self-heal exhausted its retry cap.
+      const terminal = data.failure_class && data.failure_class !== 'none';
+      const reviewerNote = terminal
+        ? `Pipeline terminated (${data.failure_class}). See the security audit strip for details.`
+        : 'Constraints checked. Awaiting human authorization to run against the workspace.';
       setState((s) => ({
         ...s,
         running: false,
-        phase: 'awaiting_hitl',
+        phase: terminal ? (data.failure_class === 'policy' ? 'blocked' : 'exhausted') : 'awaiting_hitl',
         code: data.proposed_code || '',
         priorCode: data.prior_code || null,
         healError: data.heal_error || null,
         selfHealed: !!data.self_healed,
+        healAttempts: data.heal_attempts || 0,
+        failureClass: data.failure_class || null,
         reviewerReport: data.reviewer_security_report || '',
-        logs: [...s.logs, { role: 'Reviewer', time: timeNow(), text: 'Constraints checked. Awaiting human authorization to run against the workspace.' }],
+        securityAudit: data.security_audit || null,
+        researchSources: data.research_sources || [],
+        logs: [
+          ...s.logs,
+          ...(data.research_sources && data.research_sources.length
+            ? [{ role: 'Researcher', time: timeNow(), text: `Grounded in ${data.research_sources.length} FAISS methodology docs: ${data.research_sources.map((r) => r.title).join(' · ')}` }]
+            : []),
+          { role: 'Reviewer', time: timeNow(), text: reviewerNote },
+        ],
       }));
     } catch (err) {
       setState((s) => ({ ...s, running: false, phase: 'error', errorMessage: err.message }));
