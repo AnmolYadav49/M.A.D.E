@@ -20,7 +20,7 @@ from runcontext import (
     current_llm_key, current_session_id,
     SessionStampFilter, SecretRedactingFilter, redact,
 )
-from graph import made_app, sandbox_env, MissingLLMKey, _preexec, _truncate
+from graph import made_app, sandbox_env, MissingLLMKey, sandbox_popen_kwargs, _truncate
 from security import analyze_code, strip_markdown_code_fence
 
 load_dotenv()
@@ -361,7 +361,7 @@ async def approve_and_run(
             result = subprocess.run(
                 [sys.executable, "-I", os.path.basename(file_path)],
                 capture_output=True, text=True, timeout=15,
-                cwd=workspace_dir, env=sandbox_env(), preexec_fn=_preexec,
+                cwd=workspace_dir, env=sandbox_env(), **sandbox_popen_kwargs(),
             )
             if result.returncode == 0:
                 return {"status": "Execution Successful", "stdout": _truncate(result.stdout),

@@ -24,11 +24,20 @@ from __future__ import annotations
 import logging
 import os
 import re
-import resource
 import subprocess
 import sys
 import tempfile
 from typing import Any
+
+# `resource` is POSIX-only. Importing it unguarded made the whole module — and
+# therefore the entire server — fail to start on Windows with
+# ModuleNotFoundError, which is a poor trade for an optional hardening layer.
+try:
+    import resource
+except ImportError:  # Windows
+    resource = None
+
+_POSIX = os.name == "posix"
 
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
@@ -231,8 +240,20 @@ def _sandbox_rlimits() -> None:
         pass
 
 
-def _preexec():
-    return _sandbox_rlimits() if hasattr(resource, "setrlimit") else None
+def sandbox_popen_kwargs() -> dict[str, Any]:
+    """Platform-specific hardening kwargs for the sandbox subprocess.
+
+    `preexec_fn` exists only on POSIX — passing it on Windows raises
+    ValueError outright, so it has to be omitted rather than guarded inside
+    the callback. On Windows the rlimits are therefore not applied and the
+    remaining containment is the wall-clock timeout, the scrubbed environment
+    and the throwaway cwd. That is weaker, which is worth stating plainly:
+    Windows is fine for local development, but a deployment that enables
+    execution should be Linux.
+    """
+    if _POSIX and resource is not None:
+        return {"preexec_fn": _sandbox_rlimits}
+    return {}
 
 
 def _truncate(text: str | None) -> str:
@@ -253,7 +274,7 @@ def sandbox_env() -> dict[str, str]:
     also print — straight into the session log rendered in the browser. We pass
     only what CPython needs to start.
     """
-    return {
+    env = {
         "PATH": os.getenv("PATH", "/usr/bin:/bin"),
         "LANG": os.getenv("LANG", "C.UTF-8"),
         "PYTHONIOENCODING": "utf-8",
@@ -262,6 +283,17 @@ def sandbox_env() -> dict[str, str]:
         # cannot reach the operator's real home directory.
         "HOME": ".",
     }
+    if os.name == "nt":
+        # CPython on Windows fails to start without SystemRoot — os.urandom and
+        # socket initialisation resolve DLLs relative to it. Scrubbing it out
+        # does not harden anything, it just breaks the child. USERPROFILE is
+        # pointed at the throwaway cwd for the same reason HOME is above.
+        for var in ("SystemRoot", "SYSTEMROOT", "COMSPEC", "PATHEXT"):
+            value = os.getenv(var)
+            if value:
+                env[var] = value
+        env["USERPROFILE"] = "."
+    return env
 
 
 def _classify_failure(returncode: int, stderr: str, timed_out: bool = False) -> str:
@@ -309,7 +341,7 @@ def sandbox_executor_node(state: MADEState) -> dict[str, Any]:
             result = subprocess.run(
                 [sys.executable, "-I", "-c", clean_code],  # -I: isolated mode, ignores PYTHON* env and cwd on sys.path
                 capture_output=True, text=True, timeout=SANDBOX_TIMEOUT_SEC,
-                cwd=workdir, env=sandbox_env(), preexec_fn=_preexec,
+                cwd=workdir, env=sandbox_env(), **sandbox_popen_kwargs(),
             )
         if result.returncode == 0:
             logging.info("--- ✅ SANDBOX SUCCESS: Traceback clean. Routing to Reviewer ---")

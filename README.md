@@ -214,3 +214,105 @@ this ever needs to run untrusted code publicly.
 | `MADE_MAX_TASK_CHARS` | `2000` | rejects oversized prompts before any model call is billed |
 | `MADE_SANDBOX_MEM_MB` | `512` | `RLIMIT_AS` ceiling for the sandbox child |
 | `MADE_SANDBOX_MAX_OUTPUT_BYTES` | `64000` | truncates captured stdout/stderr |
+
+---
+
+## 🪟 Running on Windows
+
+Everything works on Windows, with two caveats worth knowing:
+
+- The sandbox **rlimits** (CPU / memory / process caps) are POSIX-only. On
+  Windows the remaining containment is the wall-clock timeout, the scrubbed
+  environment and the throwaway working directory. Fine for development;
+  deploy on Linux if you ever enable execution publicly.
+- Use **PowerShell**. The `set VAR=value` syntax below differs in `cmd.exe`,
+  and the commands assume PowerShell throughout.
+
+### One-time setup
+
+```powershell
+cd "$env:USERPROFILE\M.A.D.E"
+
+# Python side
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+pip install -r requirements.txt -r requirements-dev.txt
+python build_db.py                 # builds faiss_index\ (downloads the embedding model once)
+
+# Frontend side (needs Node 18+)
+cd web
+npm install
+npm run build
+cd ..
+```
+
+If `Activate.ps1` is blocked with *"running scripts is disabled on this
+system"*, allow local scripts for your user once:
+
+```powershell
+Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
+```
+
+### Run it — demo mode (no API key needed)
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+$env:MADE_DEMO_MODE = "1"
+python -m uvicorn main:app --host 127.0.0.1 --port 8000
+```
+
+Open <http://127.0.0.1:8000>.
+
+### Run it — live agents with your own key
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+Remove-Item Env:MADE_DEMO_MODE -ErrorAction SilentlyContinue
+$env:OPENROUTER_API_KEY = "sk-or-v1-your-key-here"
+python -m uvicorn main:app --host 127.0.0.1 --port 8000
+```
+
+### Run it — public / bring-your-own-key mode (what Render runs)
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+$env:MADE_PUBLIC_MODE = "1"
+$env:MADE_ALLOW_EXECUTION = "0"
+python -m uvicorn main:app --host 127.0.0.1 --port 8000
+```
+
+### Tests (second PowerShell window, server already running)
+
+```powershell
+cd "$env:USERPROFILE\M.A.D.E"
+.\.venv\Scripts\Activate.ps1
+
+python tests\test_security_audit.py      # 39 cases, no server needed
+python tests\test_platform_guards.py     # cross-platform guards, no server needed
+python tests\smoketest_websocket.py      # needs the server running
+python tests\smoketest_deployment.py     # needs the server in MADE_PUBLIC_MODE=1
+```
+
+### Clearing an env var between runs
+
+`$env:VAR = "1"` persists for the life of that PowerShell window, which is a
+common source of confusion — a server started later in the same window
+inherits it. To clear one:
+
+```powershell
+Remove-Item Env:MADE_DEMO_MODE -ErrorAction SilentlyContinue
+```
+
+Or just open a fresh window.
+
+### cmd.exe equivalents
+
+If you would rather use Command Prompt:
+
+```bat
+.venv\Scripts\activate.bat
+set MADE_DEMO_MODE=1
+set MADE_DEMO_MODE=            :: (clears it — note the trailing =)
+python -m uvicorn main:app --host 127.0.0.1 --port 8000
+```
