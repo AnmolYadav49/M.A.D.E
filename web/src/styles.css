@@ -43,6 +43,10 @@ a:hover { color: #e79878; }
   transform: translateY(-2px);
   box-shadow: 0 6px 18px rgba(176, 87, 48, .25);
 }
+.demo-chip-adversarial:hover {
+  background: rgba(224, 74, 60, 0.22) !important;
+  box-shadow: 0 6px 18px rgba(224, 74, 60, .25);
+}
 .demo-chip:active { transform: translateY(0) scale(.97); }
 .demo-chip::after {
   content: '';

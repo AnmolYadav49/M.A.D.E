@@ -3,7 +3,8 @@ import React from 'react';
 const GRAPH_NODES = [
   { name: 'Researcher', symbol: 'search', desc: 'Gathers methodology', long: 'Formulates the Python libraries and technical methodology needed for the task, grounded by the FAISS-backed local knowledge base.' },
   { name: 'Coder', symbol: 'code', desc: 'Writes the script', long: 'Translates the research methodology into clean, executable Python. Re-invoked with the sandbox’s traceback whenever a run fails — the self-heal loop.' },
-  { name: 'Sandbox', symbol: 'terminal', desc: 'Runs in isolation', long: 'Executes the candidate script as an isolated subprocess with a hard timeout. On failure it routes stderr back to the Coder instead of surfacing a crash.' },
+  { name: 'Policy', symbol: 'policy', desc: 'Audits before running', long: 'Deterministic ast-based audit: import allowlist, denied builtins (eval/exec/open), and sandbox-escape patterns. Sits upstream of the sandbox so refused code is never executed. Blocked code routes back to the Coder, capped by the same retry limit.' },
+  { name: 'Sandbox', symbol: 'terminal', desc: 'Runs in isolation', long: 'Executes the candidate script as an isolated subprocess with a hard timeout, a scrubbed environment (no API keys inherited) and a throwaway working directory. On failure it routes stderr back to the Coder instead of surfacing a crash.' },
   { name: 'Reviewer', symbol: 'fact_check', desc: 'Verifies output', long: 'Performs a security and syntax audit — dangerous calls, missing imports — and produces the clearance report shown at the HITL gate.' },
   { name: 'Gate', symbol: 'gavel', desc: 'Human approval', long: 'Human-in-the-loop checkpoint. Approve executes the reviewed script against the real workspace; reject clears the generated workspace and terminates the run.' },
 ];
@@ -33,11 +34,15 @@ export default function GraphView({ visible }) {
           <defs>
             <marker id="ah2" markerWidth="7" markerHeight="7" refX="4" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="var(--accent)" /></marker>
           </defs>
-          <path d="M50 1 C 50 20, 26 20, 26 2" fill="none" stroke="var(--accent)" strokeWidth="0.7" strokeDasharray="2.4 2" markerEnd="url(#ah2)" style={{ animation: 'dash 1.2s linear infinite' }} vectorEffect="non-scaling-stroke" />
+          {/* Sandbox (node 3 of 6) loops back to Coder (node 1) on failure. */}
+          <path d="M60 1 C 60 22, 20 22, 20 2" fill="none" stroke="var(--accent)" strokeWidth="0.7" strokeDasharray="2.4 2" markerEnd="url(#ah2)" style={{ animation: 'dash 1.2s linear infinite' }} vectorEffect="non-scaling-stroke" />
         </svg>
         <div style={{ position: 'absolute', bottom: 40, left: 0, right: 0, display: 'flex', justifyContent: 'center', gap: 28 }}>
           <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontFamily: "'JetBrains Mono',monospace", fontSize: 10, letterSpacing: '.06em', textTransform: 'uppercase', color: 'var(--accent)' }}>
             <span style={{ width: 16, height: 2, background: 'var(--accent)', display: 'inline-block' }} />on sandbox failure → self-heal
+          </span>
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontFamily: "'JetBrains Mono',monospace", fontSize: 10, letterSpacing: '.06em', textTransform: 'uppercase', color: 'var(--err)' }}>
+            <span style={{ width: 16, height: 2, background: 'var(--err)', display: 'inline-block' }} />on policy block → refused, never executed
           </span>
         </div>
       </div>

@@ -15,7 +15,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 from dotenv import load_dotenv
 
-from graph import made_app
+from graph import made_app, DEMO_MODE, sandbox_env
 from security import analyze_code, strip_markdown_code_fence, BLOCK as SECURITY_BLOCK
 
 load_dotenv()
@@ -139,8 +139,18 @@ async def startup_event():
     ws_handler.setFormatter(logging.Formatter("[%(levelname)s] %(message)s"))
     logging.getLogger("uvicorn.access").addHandler(ws_handler)
     logging.getLogger("uvicorn.error").addHandler(ws_handler)
-    logging.getLogger().addHandler(ws_handler)
-    logging.getLogger().setLevel(logging.INFO)
+
+    root = logging.getLogger()
+    root.addHandler(ws_handler)
+    # Without a stream handler the agent trace exists ONLY on the websocket, so
+    # with no browser attached the entire pipeline runs with nothing written to
+    # stdout, the container log, or anywhere an operator could read it after the
+    # fact. Mirror it to stderr so runs are diagnosable server-side too.
+    if not any(isinstance(h, logging.StreamHandler) for h in root.handlers):
+        stream_handler = logging.StreamHandler()
+        stream_handler.setFormatter(logging.Formatter("[%(levelname)s] %(message)s"))
+        root.addHandler(stream_handler)
+    root.setLevel(logging.INFO)
 
     if API_KEY is None:
         logging.warning("=" * 70)
@@ -150,6 +160,13 @@ async def startup_event():
         logging.warning("=" * 70)
     else:
         logging.info("MADE API key auth ENABLED. Allowed origins: %s", ALLOWED_ORIGINS)
+
+    if DEMO_MODE:
+        logging.warning("=" * 70)
+        logging.warning("MADE_DEMO_MODE is ON — agent responses are SCRIPTED, not live inference.")
+        logging.warning("Graph routing, sandbox execution, AST audit and the self-heal")
+        logging.warning("loop all still run for real. Unset MADE_DEMO_MODE for live agents.")
+        logging.warning("=" * 70)
 
 
 @app.websocket("/ws/logs")
@@ -197,6 +214,7 @@ async def health_check():
         "auth_enabled": API_KEY is not None,
         "allowed_origins": ALLOWED_ORIGINS,
         "rate_limit_per_min": RATE_LIMIT_PER_MIN,
+        "demo_mode": DEMO_MODE,
     }
 
 
@@ -269,8 +287,15 @@ async def approve_and_run(request: ApprovalRequest, _: None = Depends(require_ap
         # libraries) as the FastAPI server — otherwise `import numpy/sympy/…`
         # can fail with ModuleNotFoundError depending on how the server was
         # launched (venv vs system Python).
+        #
+        # env is scrubbed (sandbox_env) so the approved script cannot read
+        # OPENROUTER_API_KEY / MADE_API_KEY out of the environment and print
+        # them into the response, and cwd is the workspace dir so relative
+        # paths stay inside it rather than reaching the repo root.
         result = subprocess.run(
-            [sys.executable, file_path], capture_output=True, text=True, timeout=15,
+            [sys.executable, os.path.basename(file_path)],
+            capture_output=True, text=True, timeout=15,
+            cwd=workspace_dir, env=sandbox_env(),
         )
         if result.returncode == 0:
             return {"status": "Execution Successful", "stdout": result.stdout, "security_audit": audit.to_dict()}

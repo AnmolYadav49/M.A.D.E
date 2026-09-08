@@ -29,12 +29,23 @@ export default function SecurityModal({ open, onClose }) {
         </div>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16, fontFamily: "'JetBrains Mono',monospace", fontSize: 12.5, lineHeight: 1.6 }}>
           <div>
-            <div style={{ color: 'var(--dim3)', textTransform: 'uppercase', letterSpacing: '.06em', fontSize: 10, marginBottom: 6 }}>AST Rules</div>
-            <div style={{ color: 'var(--ok)' }}>✓ Whitelist · numpy, pandas, langchain, faiss</div>
-            <div style={{ color: 'var(--err)' }}>✕ Blocked · subprocess, eval, exec, os.system</div>
+            <div style={{ color: 'var(--dim3)', textTransform: 'uppercase', letterSpacing: '.06em', fontSize: 10, marginBottom: 6 }}>Import allowlist (enforced pre-execution)</div>
+            <div style={{ color: 'var(--ok)' }}>✓ math, statistics, numpy, pandas, sympy, scipy, sklearn</div>
+            <div style={{ color: 'var(--err)' }}>✕ os, sys, subprocess, socket, requests, ctypes, pickle</div>
+          </div>
+          <div>
+            <div style={{ color: 'var(--dim3)', textTransform: 'uppercase', letterSpacing: '.06em', fontSize: 10, marginBottom: 6 }}>Denied calls</div>
+            <div style={{ color: 'var(--err)' }}>✕ eval, exec, compile, __import__, open</div>
+            <div style={{ color: 'var(--err)' }}>✕ __class__ / __subclasses__ / __globals__ escapes</div>
           </div>
           <div style={{ display: 'flex', justifyContent: 'space-between', borderTop: '1px solid var(--border)', paddingTop: 14 }}>
-            <span style={{ color: 'var(--dim2)' }}>Sandbox</span><span style={{ color: 'var(--fg)' }}>Isolated subprocess · 10–15s timeout</span>
+            <span style={{ color: 'var(--dim2)' }}>Gate position</span><span style={{ color: 'var(--fg)' }}>Before the sandbox, not after</span>
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+            <span style={{ color: 'var(--dim2)' }}>Subprocess env</span><span style={{ color: 'var(--fg)' }}>Scrubbed · no API keys inherited</span>
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+            <span style={{ color: 'var(--dim2)' }}>Working directory</span><span style={{ color: 'var(--fg)' }}>Throwaway temp dir</span>
           </div>
           <div style={{ display: 'flex', justifyContent: 'space-between' }}>
             <span style={{ color: 'var(--dim2)' }}>Human-in-the-loop</span><span style={{ color: 'var(--fg)' }}>Required before execution</span>

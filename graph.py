@@ -26,6 +26,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 from typing import Any
 
 from dotenv import load_dotenv
@@ -45,27 +46,37 @@ MAX_HEAL_ATTEMPTS = int(os.getenv("MADE_MAX_HEAL_ATTEMPTS", "3"))
 SANDBOX_TIMEOUT_SEC = int(os.getenv("MADE_SANDBOX_TIMEOUT_SEC", "10"))
 FAISS_INDEX_DIR = os.getenv("MADE_FAISS_INDEX_DIR", "faiss_index")
 RESEARCH_TOP_K = int(os.getenv("MADE_RESEARCH_TOP_K", "4"))
+DEMO_MODE = os.getenv("MADE_DEMO_MODE", "").strip().lower() in {"1", "true", "yes"}
 
 
 _llm = None
 
 
-def llm() -> ChatOpenAI:
-    """Lazy-init the OpenRouter chat model.
+def llm():
+    """Lazy-init the chat model.
 
     Module-level construction used to raise at import time when
     OPENROUTER_API_KEY was unset, so `from graph import _load_retriever` (used
     in the smoke test) broke before it could even check the retriever. Deferring
     the check lets non-LLM code paths — the AST audit, the retriever, and tests
     of both — import cleanly.
+
+    Under MADE_DEMO_MODE the model is replaced by a scripted responder (see
+    demo_llm.py). Only the model's *text* is scripted — the graph routing,
+    sandbox, AST audit and self-heal loop all still run for real.
     """
     global _llm
     if _llm is None:
-        _llm = ChatOpenAI(
-            openai_api_base="https://openrouter.ai/api/v1",
-            openai_api_key=os.getenv("OPENROUTER_API_KEY"),
-            model_name=os.getenv("MADE_MODEL_NAME", "openrouter/free"),
-        )
+        if DEMO_MODE:
+            from demo_llm import ScriptedLLM
+            logging.warning("--- 🎬 DEMO MODE: using scripted agent responses, NOT live inference ---")
+            _llm = ScriptedLLM()
+        else:
+            _llm = ChatOpenAI(
+                openai_api_base="https://openrouter.ai/api/v1",
+                openai_api_key=os.getenv("OPENROUTER_API_KEY"),
+                model_name=os.getenv("MADE_MODEL_NAME", "openrouter/free"),
+            )
     return _llm
 
 
@@ -179,6 +190,25 @@ def coder_node(state: MADEState) -> dict[str, Any]:
 
 # --------------------------- Sandbox executor ---------------------------------
 
+def sandbox_env() -> dict[str, str]:
+    """Minimal environment for the sandbox subprocess.
+
+    The child must not inherit the parent's environment: OPENROUTER_API_KEY and
+    MADE_API_KEY live there, and anything the generated code can read it can
+    also print — straight into the session log rendered in the browser. We pass
+    only what CPython needs to start.
+    """
+    return {
+        "PATH": os.getenv("PATH", "/usr/bin:/bin"),
+        "LANG": os.getenv("LANG", "C.UTF-8"),
+        "PYTHONIOENCODING": "utf-8",
+        "PYTHONDONTWRITEBYTECODE": "1",
+        # HOME is deliberately pointed at the throwaway cwd, so `~` expansions
+        # cannot reach the operator's real home directory.
+        "HOME": ".",
+    }
+
+
 def _classify_failure(returncode: int, stderr: str, timed_out: bool = False) -> str:
     """Bucket a subprocess failure so the Coder gets a targeted repair prompt."""
     if timed_out:
@@ -200,10 +230,17 @@ def sandbox_executor_node(state: MADEState) -> dict[str, Any]:
         # sys.executable so the sandbox runs with the same interpreter (and
         # therefore the same site-packages) as the graph — see the matching
         # note in main.py's /approve-and-run.
-        result = subprocess.run(
-            [sys.executable, "-c", clean_code],
-            capture_output=True, text=True, timeout=SANDBOX_TIMEOUT_SEC,
-        )
+        #
+        # cwd is an empty throwaway directory so relative paths the model might
+        # emit ('.env', 'mock_data.csv') resolve into nothing rather than into
+        # the repo. Combined with sandbox_env() this means a bypass of the AST
+        # audit still lands somewhere with no secrets and no project files.
+        with tempfile.TemporaryDirectory(prefix="made-sandbox-") as workdir:
+            result = subprocess.run(
+                [sys.executable, "-c", clean_code],
+                capture_output=True, text=True, timeout=SANDBOX_TIMEOUT_SEC,
+                cwd=workdir, env=sandbox_env(),
+            )
         if result.returncode == 0:
             logging.info("--- ✅ SANDBOX SUCCESS: Traceback clean. Routing to Reviewer ---")
             return {"execution_output": result.stdout, "error_traceback": None, "failure_class": None}
@@ -218,30 +255,82 @@ def sandbox_executor_node(state: MADEState) -> dict[str, Any]:
         return {"execution_output": None, "error_traceback": str(e), "failure_class": "runtime"}
 
 
+# --------------------------- Policy gate (pre-execution) ----------------------
+
+def audit_node(state: MADEState) -> dict[str, Any]:
+    """Static policy gate. Runs BEFORE the sandbox, never after.
+
+    This node exists because of a real ordering defect: the AST audit used to
+    live only in reviewer_node, which the graph reaches *after*
+    sandbox_executor_node. That meant untrusted generated code was executed
+    first and audited second — `os.popen('id')` ran (as root) before anything
+    inspected it. A static control positioned downstream of the thing it is
+    meant to protect is decoration, not enforcement.
+
+    The audit result is written to state here and reused by reviewer_node, so
+    the code is parsed once and the same verdict is reported everywhere.
+    """
+    logging.info("--- 🔒 POLICY GATE: static AST audit before execution ---")
+    clean_code = strip_markdown_code_fence(state.get("generated_code", ""))
+    audit = analyze_code(clean_code)
+
+    if audit.is_blocked:
+        logging.info("--- 🚫 POLICY GATE: BLOCKED — code will NOT be executed. %s ---",
+                     security_summarize(audit))
+        return {
+            "security_audit": audit.to_dict(),
+            "failure_class": "policy",
+            "error_traceback": security_summarize(audit),
+        }
+
+    logging.info("--- ✅ POLICY GATE: passed, releasing to sandbox ---")
+    return {"security_audit": audit.to_dict(), "failure_class": None, "error_traceback": None}
+
+
+def route_after_audit(state: MADEState) -> str:
+    """Blocked code never reaches the sandbox; it goes back to the Coder (capped)."""
+    if state.get("failure_class") != "policy":
+        return "sandbox_executor"
+    if state.get("heal_attempts", 0) >= MAX_HEAL_ATTEMPTS:
+        logging.info("--- 🛑 POLICY BLOCK persisted for %d attempts — terminating ---", MAX_HEAL_ATTEMPTS)
+        return "blocked"
+    logging.info("--- 🔁 POLICY BLOCK: re-routing to Coder to produce compliant code (attempt %d/%d) ---",
+                 state.get("heal_attempts", 0) + 1, MAX_HEAL_ATTEMPTS)
+    return "coder"
+
+
+def blocked_node(state: MADEState) -> dict[str, Any]:
+    """Terminal node for code the policy gate refused and the Coder could not fix."""
+    return {
+        "failure_class": "policy",
+        "reviewer_notes": (
+            "Refused by the static policy gate before execution.\n\n"
+            + (state.get("error_traceback") or "")
+        ),
+        "human_approved": False,
+    }
+
+
 # --------------------------- Reviewer -----------------------------------------
 
 def reviewer_node(state: MADEState) -> dict[str, Any]:
-    """Deterministic AST audit + LLM commentary. Audit is authoritative."""
-    logging.info("--- 🛡️  REVIEWER AGENT: AST audit + syntax review ---")
+    """LLM commentary on top of the already-passed static audit.
+
+    By the time the graph reaches here the policy gate has already approved the
+    code and the sandbox has run it cleanly. The audit verdict is re-read from
+    state rather than recomputed, so there is exactly one source of truth.
+    """
+    logging.info("--- 🛡️  REVIEWER AGENT: syntax + correctness review ---")
 
     clean_code = strip_markdown_code_fence(state.get("generated_code", ""))
-    audit = analyze_code(clean_code)
-    audit_dict = audit.to_dict()
+    audit_dict = state.get("security_audit") or analyze_code(clean_code).to_dict()
+    audit_summary = (
+        f"AST audit PASSED ({sum(1 for f in audit_dict['findings'] if f['severity'] == 'pass')} checks, 0 blocks)."
+    )
 
-    if audit.is_blocked:
-        # Deterministic BLOCK — do NOT ask the LLM. Its verdict does not matter here.
-        logging.info("--- 🚫 REVIEWER: BLOCKED by AST audit — refusing to hand off to HITL gate ---")
-        return {
-            "security_audit": audit_dict,
-            "reviewer_notes": security_summarize(audit),
-            "failure_class": "policy",
-            "human_approved": False,
-        }
-
-    # AST audit passed; ask the LLM for a human-readable review as *commentary*.
     prompt = (
         f"You are a strict Security & Code Reviewer. The deterministic AST audit already passed with these checks:\n"
-        f"{security_summarize(audit)}\n\n"
+        f"{audit_summary}\n\n"
         f"Review this code for correctness, missing edge cases, and any residual concerns the AST audit cannot see. "
         f"Be brief (3–5 sentences).\n\nCODE:\n{clean_code}"
     )
@@ -252,7 +341,7 @@ def reviewer_node(state: MADEState) -> dict[str, Any]:
 
     return {
         "security_audit": audit_dict,
-        "reviewer_notes": f"{security_summarize(audit)}\n\n{llm_notes}",
+        "reviewer_notes": f"{audit_summary}\n\n{llm_notes}",
         "failure_class": None,
         "human_approved": False,
     }
@@ -285,16 +374,30 @@ def exhausted_node(state: MADEState) -> dict[str, Any]:
 
 # --------------------------- Graph wiring -------------------------------------
 
+# researcher → coder → [policy gate] → sandbox → reviewer → END
+#                        │                 │
+#                        │ blocked         │ failed
+#                        └──► coder ◄──────┘   (both capped by MAX_HEAL_ATTEMPTS)
+#
+# The policy gate sits between coder and sandbox deliberately: generated code is
+# audited BEFORE it is ever executed, not after.
 workflow = StateGraph(MADEState)
 workflow.add_node("researcher", researcher_node)
 workflow.add_node("coder", coder_node)
+workflow.add_node("audit", audit_node)
 workflow.add_node("sandbox_executor", sandbox_executor_node)
 workflow.add_node("reviewer", reviewer_node)
 workflow.add_node("exhausted", exhausted_node)
+workflow.add_node("blocked", blocked_node)
 
 workflow.set_entry_point("researcher")
 workflow.add_edge("researcher", "coder")
-workflow.add_edge("coder", "sandbox_executor")
+workflow.add_edge("coder", "audit")
+workflow.add_conditional_edges(
+    "audit",
+    route_after_audit,
+    {"sandbox_executor": "sandbox_executor", "coder": "coder", "blocked": "blocked"},
+)
 workflow.add_conditional_edges(
     "sandbox_executor",
     route_after_execution,
@@ -302,5 +405,6 @@ workflow.add_conditional_edges(
 )
 workflow.add_edge("reviewer", END)
 workflow.add_edge("exhausted", END)
+workflow.add_edge("blocked", END)
 
 made_app = workflow.compile()

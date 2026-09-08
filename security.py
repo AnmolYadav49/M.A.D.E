@@ -48,6 +48,12 @@ BLOCKED_BUILTINS: frozenset[str] = frozenset({
     "eval", "exec", "compile", "__import__",
     "input",       # blocks interactive prompts inside batch runs
     "breakpoint",  # blocks dropping into pdb
+    # File I/O is refused because the "sandbox" is currently a plain subprocess
+    # on the host, not a container. Without filesystem isolation, `open` is a
+    # credential-exfiltration primitive: `print(open('.env').read())` would put
+    # OPENROUTER_API_KEY straight into the session log. Re-enable this only
+    # once generated code runs inside a real container (see README roadmap).
+    "open",
 })
 
 # Dunder attributes commonly used for sandbox escapes
@@ -77,6 +83,18 @@ BLOCKED_ATTRIBUTE_CHAINS: frozenset[tuple[str, str]] = frozenset({
     ("httpx", "get"), ("httpx", "post"),
     ("pickle", "loads"), ("pickle", "load"),
     ("ctypes", "CDLL"), ("ctypes", "cdll"),
+    # Allowlisted numeric libraries ship their own file I/O, which would walk
+    # straight around the `open` block above. Static analysis can never close
+    # this class of hole completely — a rich enough allowlisted library always
+    # offers another path — which is exactly why the container sandbox is still
+    # the load-bearing control. These entries raise the bar for the obvious
+    # cases rather than claiming completeness.
+    ("io", "open"), ("io", "FileIO"),
+    ("pandas", "read_csv"), ("pandas", "read_json"), ("pandas", "read_table"),
+    ("pandas", "read_pickle"), ("pandas", "read_parquet"), ("pandas", "read_excel"),
+    ("pandas", "read_html"), ("pandas", "read_sql"), ("pandas", "read_fwf"),
+    ("numpy", "load"), ("numpy", "loadtxt"), ("numpy", "genfromtxt"),
+    ("numpy", "fromfile"), ("numpy", "save"), ("numpy", "savetxt"),
 })
 
 # Severity levels the frontend renders as pass/warn/block chips.
@@ -116,12 +134,35 @@ def _root_name(node: ast.AST) -> str | None:
     return None
 
 
-def _chain_names(node: ast.Attribute) -> tuple[str, str] | None:
-    """Return ("<root-module>", "<last-attr>") for an ast.Attribute, if the chain is a bare name."""
+def _chain_names(node: ast.Attribute, aliases: dict[str, str] | None = None) -> tuple[str, str] | None:
+    """Return ("<root-module>", "<last-attr>") for an ast.Attribute chain.
+
+    `aliases` maps local binding -> real module name, so `import pandas as foo`
+    followed by `foo.read_csv(...)` still resolves to ("pandas", "read_csv").
+    Without it the blocklist could be defeated by renaming the import.
+    """
     root = _root_name(node)
     if root is None:
         return None
+    if aliases:
+        root = aliases.get(root, root)
     return (root, node.attr)
+
+
+def _import_aliases(tree: ast.AST) -> dict[str, str]:
+    """Map every local import binding back to its real top-level module name."""
+    aliases: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for a in node.names:
+                real = a.name.split(".")[0]
+                aliases[a.asname or real] = real
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            real = node.module.split(".")[0]
+            for a in node.names:
+                # `from os import system as s` -> treat `s` as `os.system`
+                aliases[a.asname or a.name] = real
+    return aliases
 
 
 def analyze_code(source: str) -> SecurityAudit:
@@ -168,6 +209,20 @@ def analyze_code(source: str) -> SecurityAudit:
         ))
 
     # 3. Blocked builtins & dangerous attribute chains.
+    # Alias-aware so `import pandas as foo; foo.read_csv(...)` and
+    # `from os import system as s; s(...)` are both still caught.
+    aliases = _import_aliases(tree)
+    # Bare names bound by `from <mod> import <name>` that resolve to a blocked
+    # chain, e.g. `from os import system` makes `system(...)` equivalent to
+    # `os.system(...)`.
+    blocked_bare_names: dict[str, tuple[str, str]] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module:
+            real = node.module.split(".")[0]
+            for a in node.names:
+                if (real, a.name) in BLOCKED_ATTRIBUTE_CHAINS:
+                    blocked_bare_names[a.asname or a.name] = (real, a.name)
+
     saw_dangerous_call = False
     saw_dunder_access = False
     for node in ast.walk(tree):
@@ -180,8 +235,16 @@ def analyze_code(source: str) -> SecurityAudit:
                     severity=BLOCK, line=node.lineno,
                 ))
                 saw_dangerous_call = True
+            elif isinstance(func, ast.Name) and func.id in blocked_bare_names:
+                mod, attr = blocked_bare_names[func.id]
+                findings.append(Finding(
+                    check="Dangerous attribute call",
+                    detail=f"call to '{func.id}(...)' resolves to '{mod}.{attr}' and is denied",
+                    severity=BLOCK, line=node.lineno,
+                ))
+                saw_dangerous_call = True
             elif isinstance(func, ast.Attribute):
-                chain = _chain_names(func)
+                chain = _chain_names(func, aliases)
                 if chain in BLOCKED_ATTRIBUTE_CHAINS:
                     findings.append(Finding(
                         check="Dangerous attribute call",

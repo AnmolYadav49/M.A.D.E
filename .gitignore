@@ -14,3 +14,6 @@ venv/
 
 # React/Vite frontend source build tooling — frontend/ (its build output) is tracked
 web/node_modules/
+# Walkthrough recordings (regenerate with: cd web && npm run record)
+/tmp/made-video/
+*.webm

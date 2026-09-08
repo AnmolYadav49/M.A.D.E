@@ -5,6 +5,7 @@ export const ROLE_STYLE = {
   Researcher: { avBg: 'var(--hair)', avBorder: 'var(--dim5)', avColor: 'var(--fg)', avIcon: 'search', roleColor: 'var(--dim3)' },
   Coder: { avBg: 'var(--hair)', avBorder: 'var(--dim5)', avColor: 'var(--fg)', avIcon: 'code', roleColor: 'var(--dim3)' },
   Sandbox: { avBg: 'rgba(176,87,48,.14)', avBorder: 'var(--primary)', avColor: 'var(--accent)', avIcon: 'dns', roleColor: 'var(--accent)' },
+  Policy: { avBg: 'rgba(224,74,60,.14)', avBorder: 'var(--err)', avColor: 'var(--err)', avIcon: 'policy', roleColor: 'var(--err)' },
   Reviewer: { avBg: 'var(--hair)', avBorder: 'var(--dim5)', avColor: 'var(--fg)', avIcon: 'fact_check', roleColor: 'var(--dim3)' },
   Subprocess: { avBg: 'rgba(176,87,48,.14)', avBorder: 'var(--primary)', avColor: 'var(--accent)', avIcon: 'dns', roleColor: 'var(--accent)' },
 };

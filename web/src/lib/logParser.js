@@ -15,7 +15,12 @@ export function newRunContext() {
 
 const MARKERS = [
   { match: 'RESEARCHER AGENT', phase: () => 'researching', role: 'Researcher', text: 'Analyzing the task and gathering technical context…' },
-  { match: 'CODER AGENT', phase: (ctx) => (ctx.sawFailure ? 'patching' : 'synthesizing'), role: 'Coder', text: (ctx) => (ctx.sawFailure ? 'Patching the script after the sandbox failure…' : 'Synthesizing candidate Python code…') },
+  // The retry can be triggered by either a sandbox traceback or a policy
+  // refusal, so the copy stays neutral about which one it was.
+  { match: 'CODER AGENT', phase: (ctx) => (ctx.sawFailure ? 'patching' : 'synthesizing'), role: 'Coder', text: (ctx) => (ctx.sawFailure ? 'Revising the script after the previous attempt was rejected…' : 'Synthesizing candidate Python code…') },
+  { match: 'POLICY GATE: BLOCKED', phase: () => 'blocked', role: 'Policy', text: 'Refused by the static policy gate — this code will NOT be executed.', onMatch: (ctx) => { ctx.sawFailure = true; } },
+  { match: 'POLICY GATE: passed', phase: () => 'auditing', role: 'Policy', text: 'Static AST audit passed — releasing to the sandbox.' },
+  { match: 'POLICY GATE: static AST audit', phase: () => 'auditing', role: 'Policy', text: 'Auditing the generated script before execution…' },
   { match: 'SANDBOX EXECUTOR', phase: () => 'sandbox', role: 'Sandbox', text: 'Running the candidate script in an isolated subprocess…' },
   { match: 'SANDBOX FAILED', phase: () => 'sandbox_failed', role: 'Sandbox', text: 'Execution failed — routing the traceback back to Coder for a repair pass.', onMatch: (ctx) => { ctx.sawFailure = true; } },
   { match: 'SANDBOX SUCCESS', phase: () => 'sandbox_ok', role: 'Sandbox', text: 'Execution clean — routing to Reviewer.' },
@@ -38,30 +43,38 @@ export function parseLogLine(rawLine, ctx) {
 
 // Per-node visual state, ported 1:1 from the Claude Design mockup's renderVals()
 // node-state derivation so the tracker looks identical.
+// Mirrors the LangGraph node order in graph.py exactly, including the policy
+// gate between Coder and Sandbox. The gate is a real node in the graph, so
+// omitting it here would make the tracker disagree with the Graph view.
 const NODE_DEFS = [
   { name: 'Researcher', symbol: 'search' },
   { name: 'Coder', symbol: 'code' },
+  { name: 'Policy', symbol: 'policy' },
   { name: 'Sandbox', symbol: 'terminal' },
   { name: 'Reviewer', symbol: 'fact_check' },
   { name: 'Gate', symbol: 'gavel' },
 ];
 
+// Node indices: 0 Researcher · 1 Coder · 2 Policy · 3 Sandbox · 4 Reviewer · 5 Gate
 export const PHASE_META = {
   idle: { node: -1, status: 'IDLE', color: 'var(--dim3)', anim: 'none' },
   researching: { node: 0, status: 'RESEARCHING', color: 'var(--accent)', anim: 'blink 1.4s infinite' },
   synthesizing: { node: 1, status: 'SYNTHESIZING', color: 'var(--accent)', anim: 'blink 1.4s infinite' },
-  sandbox: { node: 2, status: 'SANDBOX RUN', color: 'var(--accent)', anim: 'blink 1.4s infinite' },
-  sandbox_failed: { node: 2, status: 'SELF-HEALING', color: 'var(--err)', anim: 'blink 1.4s infinite', error: true, healing: true },
+  auditing: { node: 2, status: 'POLICY AUDIT', color: 'var(--accent)', anim: 'blink 1.4s infinite' },
+  sandbox: { node: 3, status: 'SANDBOX RUN', color: 'var(--accent)', anim: 'blink 1.4s infinite' },
+  sandbox_failed: { node: 3, status: 'SELF-HEALING', color: 'var(--err)', anim: 'blink 1.4s infinite', error: true, healing: true },
   patching: { node: 1, status: 'PATCHING', color: 'var(--primary)', anim: 'blink 1.4s infinite', healing: true },
-  sandbox_ok: { node: 2, status: 'SANDBOX RUN', color: 'var(--accent)', anim: 'blink 1.4s infinite' },
-  reviewing: { node: 3, status: 'REVIEWING', color: 'var(--accent)', anim: 'blink 1.4s infinite' },
-  awaiting_hitl: { node: 4, status: 'AWAITING HITL', color: 'var(--ok)', anim: 'blink 1.4s infinite', gate: true },
-  running_subprocess: { node: 4, status: 'RUNNING SUBPROCESS', color: 'var(--warn)', anim: 'blink 1.4s infinite' },
-  complete: { node: 5, status: 'COMPLETE', color: 'var(--ok)', anim: 'none', complete: true },
+  sandbox_ok: { node: 3, status: 'SANDBOX RUN', color: 'var(--accent)', anim: 'blink 1.4s infinite' },
+  reviewing: { node: 4, status: 'REVIEWING', color: 'var(--accent)', anim: 'blink 1.4s infinite' },
+  awaiting_hitl: { node: 5, status: 'AWAITING HITL', color: 'var(--ok)', anim: 'blink 1.4s infinite', gate: true },
+  running_subprocess: { node: 5, status: 'RUNNING SUBPROCESS', color: 'var(--warn)', anim: 'blink 1.4s infinite' },
+  complete: { node: 6, status: 'COMPLETE', color: 'var(--ok)', anim: 'none', complete: true },
   error: { node: -1, status: 'ERROR', color: 'var(--err)', anim: 'none' },
   rejected: { node: -1, status: 'REJECTED', color: 'var(--err)', anim: 'none' },
-  blocked: { node: 3, status: 'POLICY BLOCK', color: 'var(--err)', anim: 'none', error: true },
-  exhausted: { node: 2, status: 'HEAL EXHAUSTED', color: 'var(--err)', anim: 'none', error: true },
+  // The block happens AT the policy gate, so it must highlight node 2 — not the
+  // Reviewer, which the run never reaches.
+  blocked: { node: 2, status: 'POLICY BLOCK', color: 'var(--err)', anim: 'none', error: true },
+  exhausted: { node: 3, status: 'HEAL EXHAUSTED', color: 'var(--err)', anim: 'none', error: true },
 };
 
 export function computeNodes(phase) {
@@ -84,8 +97,8 @@ export function computeNodes(phase) {
     return { name: d.name, symbol: d.symbol, ...M };
   });
 
-  const posPct = ['0%', '25%', '50%', '75%', '100%'];
-  const progressPct = meta.complete ? '100%' : (active < 0 ? '0%' : posPct[Math.min(active, 4)]);
+  const posPct = ['0%', '20%', '40%', '60%', '80%', '100%'];
+  const progressPct = meta.complete ? '100%' : (active < 0 ? '0%' : posPct[Math.min(active, posPct.length - 1)]);
   const healOn = !!meta.healing;
 
   return {
