@@ -1,5 +1,4 @@
 import os
-import re
 import shutil
 import subprocess
 import logging
@@ -8,60 +7,70 @@ import sys
 import time
 from collections import defaultdict, deque
 from typing import Optional
+
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Depends, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 
-from graph import made_app, DEMO_MODE, sandbox_env
-from security import analyze_code, strip_markdown_code_fence, BLOCK as SECURITY_BLOCK
+import config
+from runcontext import (
+    current_llm_key, current_session_id,
+    SessionStampFilter, SecretRedactingFilter, redact,
+)
+from graph import made_app, sandbox_env, MissingLLMKey, _preexec, _truncate
+from security import analyze_code, strip_markdown_code_fence
 
 load_dotenv()
 
 app = FastAPI(
     title="M.A.D.E. API",
     description="Multi-Agent Data Engine with HITL Guardrails",
-    version="1.1",
+    version="1.2",
 )
-
-# --- SECURITY CONFIG ----------------------------------------------------------
-# API_KEY: if unset, the server starts in DEV MODE with a loud warning and every
-# authenticated route is open. In production, set MADE_API_KEY to a long random
-# string and configure clients to send it as `X-API-Key: <key>`.
-API_KEY = os.getenv("MADE_API_KEY", "").strip() or None
-
-# CORS: default to same-origin + the Vite dev server. Deployments override with
-# MADE_ALLOWED_ORIGINS as a comma-separated list. `*` is not allowed here —
-# `Access-Control-Allow-Origin: *` on a route that mutates state is the
-# classic self-inflicted CSRF vulnerability.
-_default_origins = "http://localhost:5173,http://127.0.0.1:5173,http://127.0.0.1:8000,http://localhost:8000"
-ALLOWED_ORIGINS = [o.strip() for o in os.getenv("MADE_ALLOWED_ORIGINS", _default_origins).split(",") if o.strip()]
-
-# Rate limiting: token bucket per (route, client-IP). Cheap in-memory guard,
-# not durable across restarts — a Redis-backed limiter belongs in production.
-RATE_LIMIT_PER_MIN = int(os.getenv("MADE_RATE_LIMIT_PER_MIN", "12"))
-
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
+    allow_origins=config.ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["Content-Type", "X-API-Key"],
+    allow_headers=["Content-Type", "X-API-Key", "X-OpenRouter-Key", "X-Session-Id"],
 )
 
 
-# --- AUTH DEPENDENCY ----------------------------------------------------------
+# --- AUTH ---------------------------------------------------------------------
 async def require_api_key(x_api_key: Optional[str] = Header(None)) -> None:
-    if API_KEY is None:
-        return  # dev mode
-    if not x_api_key or x_api_key != API_KEY:
+    """Shared-secret gate for private deployments.
+
+    Skipped in public mode: there, the thing gating usage is that each visitor
+    must bring their own LLM key, so a shared server secret would only stop
+    them from using the app at all.
+    """
+    if config.PUBLIC_MODE or config.SERVER_API_KEY is None:
+        return
+    if not x_api_key or x_api_key != config.SERVER_API_KEY:
         raise HTTPException(status_code=401, detail="Missing or invalid X-API-Key header")
 
 
-# --- RATE LIMITER MIDDLEWARE --------------------------------------------------
+def resolve_llm_key(x_openrouter_key: Optional[str]) -> Optional[str]:
+    """Pick the LLM key for this request, preferring the visitor's own.
+
+    The visitor's key is used for the duration of one request and then dropped:
+    it is never written to disk, never stored in graph state (which is returned
+    to the client), and redacted by SecretRedactingFilter if it ever reaches a
+    log record.
+    """
+    byok = (x_openrouter_key or "").strip()
+    if byok:
+        return byok
+    if config.PUBLIC_MODE:
+        return None
+    return config.SERVER_OPENROUTER_KEY
+
+
+# --- RATE LIMITER -------------------------------------------------------------
 _rate_buckets: dict[tuple[str, str], deque[float]] = defaultdict(deque)
 _RATE_LIMITED_PATHS = {"/execute-task", "/approve-and-run", "/reject-task"}
 
@@ -69,40 +78,56 @@ _RATE_LIMITED_PATHS = {"/execute-task", "/approve-and-run", "/reject-task"}
 @app.middleware("http")
 async def _rate_limit(request: Request, call_next):
     if request.url.path in _RATE_LIMITED_PATHS:
-        ip = request.client.host if request.client else "unknown"
+        # X-Forwarded-For matters behind Render/Vercel's proxy: request.client
+        # is the proxy there, so without this every visitor shares one bucket.
+        fwd = request.headers.get("x-forwarded-for", "")
+        ip = fwd.split(",")[0].strip() if fwd else (request.client.host if request.client else "unknown")
         key = (request.url.path, ip)
         window_start = time.time() - 60
         bucket = _rate_buckets[key]
         while bucket and bucket[0] < window_start:
             bucket.popleft()
-        if len(bucket) >= RATE_LIMIT_PER_MIN:
+        if len(bucket) >= config.RATE_LIMIT_PER_MIN:
             retry_after = int(60 - (time.time() - bucket[0])) + 1
             return JSONResponse(
-                {"detail": f"Rate limit exceeded: {RATE_LIMIT_PER_MIN}/min per IP"},
+                {"detail": f"Rate limit exceeded: {config.RATE_LIMIT_PER_MIN}/min per IP"},
                 status_code=429, headers={"Retry-After": str(retry_after)},
             )
         bucket.append(time.time())
     return await call_next(request)
 
 
-# --- STATIC FRONTEND SETUP ----------------------------------------------------
+# --- STATIC FRONTEND ----------------------------------------------------------
 frontend_dir = os.path.join(os.path.dirname(__file__), "frontend")
 if os.path.exists(frontend_dir):
     app.mount("/static", StaticFiles(directory=frontend_dir), name="static")
 
 
-# --- WEBSOCKET LOGGING SETUP --------------------------------------------------
-# `log_subscribers` holds one asyncio.Queue per connected websocket client so every
-# client gets every line (a single shared queue would round-robin lines across
-# clients instead of broadcasting them, starving whichever client didn't win the
-# race to `.get()` it).
-log_subscribers: set = set()
+# --- WEBSOCKET LOGGING --------------------------------------------------------
+# One queue per connected client, each tagged with the session id that client
+# owns. A log record is delivered to a client only when the record's session id
+# matches, or when the record has no session (startup/uvicorn lines, which carry
+# no user content). Without this scoping every visitor on a public deployment
+# would see every other visitor's task text, generated code and output.
+class _Subscriber:
+    __slots__ = ("queue", "session_id")
+
+    def __init__(self, session_id: Optional[str]) -> None:
+        self.queue: asyncio.Queue = asyncio.Queue(maxsize=1000)
+        self.session_id = session_id
 
 
-def broadcast_log(message: str) -> None:
-    for queue in list(log_subscribers):
+log_subscribers: set[_Subscriber] = set()
+
+
+def broadcast_log(message: str, session_id: Optional[str]) -> None:
+    for sub in list(log_subscribers):
+        if session_id is not None and sub.session_id != session_id:
+            continue
         try:
-            queue.put_nowait(message)
+            sub.queue.put_nowait(message)
+        except asyncio.QueueFull:
+            pass  # slow client; drop rather than block the pipeline
         except Exception:
             pass
 
@@ -110,12 +135,14 @@ def broadcast_log(message: str) -> None:
 class WebSocketLogHandler(logging.Handler):
     def emit(self, record):
         try:
-            broadcast_log(self.format(record))
+            broadcast_log(self.format(record), getattr(record, "session_id", None))
         except Exception:
             pass
 
 
 class WebSocketStream:
+    """Mirrors print() to the terminal and to the matching session's socket."""
+
     def __init__(self, original_stream):
         self.original_stream = original_stream
 
@@ -123,7 +150,7 @@ class WebSocketStream:
         self.original_stream.write(message)
         if message.strip():
             try:
-                broadcast_log(message.strip())
+                broadcast_log(redact(message.strip()), current_session_id.get())
             except Exception:
                 pass
 
@@ -135,62 +162,71 @@ class WebSocketStream:
 async def startup_event():
     sys.stdout = WebSocketStream(sys.stdout)
 
+    session_filter = SessionStampFilter()
+    redact_filter = SecretRedactingFilter()
+
     ws_handler = WebSocketLogHandler()
     ws_handler.setFormatter(logging.Formatter("[%(levelname)s] %(message)s"))
-    logging.getLogger("uvicorn.access").addHandler(ws_handler)
-    logging.getLogger("uvicorn.error").addHandler(ws_handler)
+    ws_handler.addFilter(redact_filter)
+    ws_handler.addFilter(session_filter)
+
+    for name in ("uvicorn.access", "uvicorn.error"):
+        logging.getLogger(name).addHandler(ws_handler)
 
     root = logging.getLogger()
     root.addHandler(ws_handler)
     # Without a stream handler the agent trace exists ONLY on the websocket, so
-    # with no browser attached the entire pipeline runs with nothing written to
-    # stdout, the container log, or anywhere an operator could read it after the
-    # fact. Mirror it to stderr so runs are diagnosable server-side too.
+    # with no browser attached a whole run produces nothing an operator can read
+    # afterwards. Mirror it to stderr too.
     if not any(isinstance(h, logging.StreamHandler) for h in root.handlers):
         stream_handler = logging.StreamHandler()
         stream_handler.setFormatter(logging.Formatter("[%(levelname)s] %(message)s"))
+        stream_handler.addFilter(redact_filter)
         root.addHandler(stream_handler)
+    root.addFilter(session_filter)
     root.setLevel(logging.INFO)
 
-    if API_KEY is None:
-        logging.warning("=" * 70)
-        logging.warning("MADE_API_KEY is UNSET — server started in DEV MODE.")
-        logging.warning("All pipeline endpoints are open. Do NOT expose this port to the internet.")
-        logging.warning("Set MADE_API_KEY=<long-random-string> before deploying.")
-        logging.warning("=" * 70)
-    else:
-        logging.info("MADE API key auth ENABLED. Allowed origins: %s", ALLOWED_ORIGINS)
-
-    if DEMO_MODE:
-        logging.warning("=" * 70)
-        logging.warning("MADE_DEMO_MODE is ON — agent responses are SCRIPTED, not live inference.")
-        logging.warning("Graph routing, sandbox execution, AST audit and the self-heal")
-        logging.warning("loop all still run for real. Unset MADE_DEMO_MODE for live agents.")
-        logging.warning("=" * 70)
+    banner = "=" * 72
+    logging.info(banner)
+    logging.info("M.A.D.E. starting — %s", "PUBLIC MODE (bring your own key)" if config.PUBLIC_MODE else "private deployment")
+    logging.info("  code execution : %s", "ENABLED" if config.ALLOW_EXECUTION else "DISABLED (pipeline runs, sandbox skipped)")
+    logging.info("  demo mode      : %s", "ON (scripted agent text)" if config.DEMO_MODE else "off")
+    logging.info("  rate limit     : %d/min per IP", config.RATE_LIMIT_PER_MIN)
+    logging.info("  CORS origins   : %s", ", ".join(config.ALLOWED_ORIGINS))
+    if config.PUBLIC_MODE and config.ALLOW_EXECUTION:
+        logging.warning("  !! PUBLIC MODE WITH EXECUTION ENABLED !!")
+        logging.warning("  Visitor-supplied prompts can cause generated Python to run on this host.")
+        logging.warning("  The AST audit is defence in depth, NOT a sandbox. Only do this if the")
+        logging.warning("  process is itself isolated (container, non-root, no network egress).")
+    if not config.PUBLIC_MODE and config.SERVER_API_KEY is None:
+        logging.warning("  MADE_API_KEY unset — pipeline endpoints are OPEN. Do not expose this port.")
+    logging.info(banner)
 
 
 @app.websocket("/ws/logs")
-async def websocket_logs(websocket: WebSocket):
+async def websocket_logs(websocket: WebSocket, session: Optional[str] = None):
     await websocket.accept()
-    queue: asyncio.Queue = asyncio.Queue()
-    log_subscribers.add(queue)
+    sub = _Subscriber(session_id=session)
+    log_subscribers.add(sub)
     try:
         while True:
-            log_message = await queue.get()
-            await websocket.send_text(log_message)
+            message = await sub.queue.get()
+            await websocket.send_text(message)
     except WebSocketDisconnect:
         pass
+    except Exception:
+        pass
     finally:
-        log_subscribers.discard(queue)
+        log_subscribers.discard(sub)
 
 
 # --- SCHEMAS ------------------------------------------------------------------
 class TaskRequest(BaseModel):
-    task: str
+    task: str = Field(min_length=1, max_length=config.MAX_TASK_CHARS)
 
 
 class ApprovalRequest(BaseModel):
-    proposed_code: str
+    proposed_code: str = Field(max_length=200_000)
     human_approved: bool
 
 
@@ -209,18 +245,31 @@ async def serve_dashboard():
 
 @app.get("/api/health")
 async def health_check():
-    return {
-        "status": "M.A.D.E. Core is online.",
-        "auth_enabled": API_KEY is not None,
-        "allowed_origins": ALLOWED_ORIGINS,
-        "rate_limit_per_min": RATE_LIMIT_PER_MIN,
-        "demo_mode": DEMO_MODE,
-    }
+    """Non-secret description of this deployment, used by the UI to decide
+    whether to prompt for a key and whether to warn that execution is off."""
+    return {"status": "M.A.D.E. Core is online.", **config.public_health(),
+            "allowed_origins": config.ALLOWED_ORIGINS}
 
 
-# --- PIPELINE ENDPOINTS -------------------------------------------------------
+# --- PIPELINE -----------------------------------------------------------------
 @app.post("/execute-task")
-async def execute_task(request: TaskRequest, _: None = Depends(require_api_key)):
+async def execute_task(
+    request: TaskRequest,
+    _: None = Depends(require_api_key),
+    x_openrouter_key: Optional[str] = Header(None),
+    x_session_id: Optional[str] = Header(None),
+):
+    llm_key = resolve_llm_key(x_openrouter_key)
+    if config.PUBLIC_MODE and not llm_key and not config.DEMO_MODE:
+        raise HTTPException(
+            status_code=401,
+            detail="This deployment runs in public mode. Add your own OpenRouter API key to run the pipeline.",
+        )
+
+    # Bind the key and session for everything awaited below. Both are contextvars
+    # so concurrent visitors never see each other's key or log lines.
+    key_token = current_llm_key.set(llm_key)
+    session_token = current_session_id.set(x_session_id)
     try:
         initial_state = {
             "task": request.task,
@@ -236,13 +285,16 @@ async def execute_task(request: TaskRequest, _: None = Depends(require_api_key))
             "failure_class": None,
             "security_audit": None,
             "research_sources": [],
+            "execution_skipped": False,
         }
 
         final_state = await made_app.ainvoke(initial_state)
 
         prior_code = final_state.get("prior_code")
         return {
-            "status": "Execution paused. Awaiting human approval." if final_state.get("failure_class") is None else "Pipeline terminated without approval.",
+            "status": "Execution paused. Awaiting human approval."
+                      if final_state.get("failure_class") is None
+                      else "Pipeline terminated without approval.",
             "reviewer_security_report": final_state.get("reviewer_notes", ""),
             "proposed_code": final_state.get("generated_code", ""),
             "self_healed": bool(prior_code),
@@ -252,19 +304,41 @@ async def execute_task(request: TaskRequest, _: None = Depends(require_api_key))
             "failure_class": final_state.get("failure_class"),
             "security_audit": final_state.get("security_audit"),
             "research_sources": final_state.get("research_sources", []),
+            "execution_skipped": bool(final_state.get("execution_skipped")),
+            "execution_output": final_state.get("execution_output"),
         }
 
+    except MissingLLMKey as e:
+        raise HTTPException(status_code=401, detail=str(e))
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        # redact: provider errors sometimes echo the key back in the message.
+        raise HTTPException(status_code=500, detail=redact(str(e)))
+    finally:
+        current_llm_key.reset(key_token)
+        current_session_id.reset(session_token)
 
 
 @app.post("/approve-and-run")
-async def approve_and_run(request: ApprovalRequest, _: None = Depends(require_api_key)):
+async def approve_and_run(
+    request: ApprovalRequest,
+    _: None = Depends(require_api_key),
+    x_session_id: Optional[str] = Header(None),
+):
     if not request.human_approved:
         return {"status": "Execution aborted by user."}
 
+    if not config.ALLOW_EXECUTION:
+        return {
+            "status": "Execution disabled",
+            "stderr": "Code execution is disabled on this deployment (MADE_ALLOW_EXECUTION=0). "
+                      "The pipeline, policy audit and review all ran; only the run step is off.",
+            "execution_skipped": True,
+        }
+
     # Second, non-bypassable pass of the AST audit. A tampered client cannot
-    # sneak past the reviewer's BLOCK by POSTing forged proposed_code directly:
+    # sneak past the policy gate by POSTing forged proposed_code directly:
     # every path that eventually runs code goes through this same check.
     clean_code = strip_markdown_code_fence(request.proposed_code)
     audit = analyze_code(clean_code)
@@ -275,33 +349,30 @@ async def approve_and_run(request: ApprovalRequest, _: None = Depends(require_ap
             "security_audit": audit.to_dict(),
         }
 
-    workspace_dir = "generated_workspace"
-    os.makedirs(workspace_dir, exist_ok=True)
-    file_path = os.path.join(workspace_dir, "executed_script.py")
-    with open(file_path, "w", encoding="utf-8") as f:
-        f.write(clean_code)
-
+    session_token = current_session_id.set(x_session_id)
     try:
-        # sys.executable rather than a bare "python" so the sandbox subprocess
-        # inherits the same interpreter (and therefore the same installed
-        # libraries) as the FastAPI server — otherwise `import numpy/sympy/…`
-        # can fail with ModuleNotFoundError depending on how the server was
-        # launched (venv vs system Python).
-        #
-        # env is scrubbed (sandbox_env) so the approved script cannot read
-        # OPENROUTER_API_KEY / MADE_API_KEY out of the environment and print
-        # them into the response, and cwd is the workspace dir so relative
-        # paths stay inside it rather than reaching the repo root.
-        result = subprocess.run(
-            [sys.executable, os.path.basename(file_path)],
-            capture_output=True, text=True, timeout=15,
-            cwd=workspace_dir, env=sandbox_env(),
-        )
-        if result.returncode == 0:
-            return {"status": "Execution Successful", "stdout": result.stdout, "security_audit": audit.to_dict()}
-        return {"status": "Execution Failed", "stderr": result.stderr, "security_audit": audit.to_dict()}
-    except subprocess.TimeoutExpired:
-        return {"status": "Failed", "stderr": "Execution timed out. Potential infinite loop.", "security_audit": audit.to_dict()}
+        workspace_dir = "generated_workspace"
+        os.makedirs(workspace_dir, exist_ok=True)
+        file_path = os.path.join(workspace_dir, "executed_script.py")
+        with open(file_path, "w", encoding="utf-8") as f:
+            f.write(clean_code)
+
+        try:
+            result = subprocess.run(
+                [sys.executable, "-I", os.path.basename(file_path)],
+                capture_output=True, text=True, timeout=15,
+                cwd=workspace_dir, env=sandbox_env(), preexec_fn=_preexec,
+            )
+            if result.returncode == 0:
+                return {"status": "Execution Successful", "stdout": _truncate(result.stdout),
+                        "security_audit": audit.to_dict()}
+            return {"status": "Execution Failed", "stderr": _truncate(result.stderr),
+                    "security_audit": audit.to_dict()}
+        except subprocess.TimeoutExpired:
+            return {"status": "Failed", "stderr": "Execution timed out. Potential infinite loop.",
+                    "security_audit": audit.to_dict()}
+    finally:
+        current_session_id.reset(session_token)
 
 
 @app.post("/reject-task")

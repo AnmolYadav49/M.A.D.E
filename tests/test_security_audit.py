@@ -63,6 +63,19 @@ CASES: list[tuple[str, str, str]] = [
     ("pandas aliased oddly", "import pandas as zz\nprint(zz.read_csv('.env'))", BLOCK),
     ("numpy loadtxt", "import numpy as np\nprint(np.loadtxt('.env'))", BLOCK),
 
+    # ---- must BLOCK: RCE via eval-equivalents in ALLOWLISTED libraries -----
+    # sympify() eval()s its argument; this was verified returning 'root' via
+    # subprocess before it was blocked. An import allowlist alone is not a
+    # sandbox precisely because of this class of API.
+    ("sympy.sympify RCE", "from sympy import sympify\nsympify(\"__import__('subprocess').check_output(['id'])\")", BLOCK),
+    ("sympy.sympify qualified", "import sympy\nsympy.sympify('1+1')", BLOCK),
+    ("sympy S alias", "from sympy import S\nS('1+1')", BLOCK),
+    ("sympy aliased module", "import sympy as sp\nsp.sympify('1+1')", BLOCK),
+    ("parse_expr", "from sympy import parse_expr\nparse_expr('1+1')", BLOCK),
+    ("pandas.eval", "import pandas as pd\npd.eval('1+1')", BLOCK),
+    ("DataFrame.query", "import pandas as pd\ndf=pd.DataFrame({'a':[1]})\ndf.query('a>0')", BLOCK),
+    ("DataFrame.eval", "import pandas as pd\ndf=pd.DataFrame({'a':[1]})\ndf.eval('a*2')", BLOCK),
+
     # ---- must BLOCK: network egress ---------------------------------------
     ("socket", "import socket\nsocket.socket()", BLOCK),
     ("requests", "import requests\nrequests.get('http://x')", BLOCK),

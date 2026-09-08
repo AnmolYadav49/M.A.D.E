@@ -8,9 +8,12 @@ import SessionView from './components/SessionView.jsx';
 import GraphView from './components/GraphView.jsx';
 import RunsView from './components/RunsView.jsx';
 import AuditView from './components/AuditView.jsx';
+import ApiKeyModal from './components/ApiKeyModal.jsx';
+import DeploymentBanner from './components/DeploymentBanner.jsx';
 import { useThemeVars, ACCENT_SWATCHES } from './lib/theme.js';
 import { usePipeline } from './lib/usePipeline.js';
 import { PHASE_META } from './lib/logParser.js';
+import { healthCheck, getApiKey } from './lib/api.js';
 
 export default function App() {
   const rootRef = useRef(null);
@@ -19,8 +22,29 @@ export default function App() {
   const [accent] = useState(ACCENT_SWATCHES[0]);
   const [termOpen, setTermOpen] = useState(false);
   const [secOpen, setSecOpen] = useState(false);
+  const [keyOpen, setKeyOpen] = useState(false);
+  const [health, setHealth] = useState(null);
+  const [hasKey, setHasKey] = useState(() => !!getApiKey());
   const themingTimeout = useRef(null);
   const pipeline = usePipeline();
+
+  // Ask the backend what kind of deployment this is: public (bring your own
+  // key) vs private, and whether code execution is enabled. The UI has to know
+  // both to avoid promising behaviour this deployment won't do.
+  useEffect(() => {
+    let alive = true;
+    healthCheck().then((h) => {
+      if (!alive || !h) return;
+      setHealth(h);
+      // Prompt for a key up front on a public deployment, since nothing works
+      // without one — better than letting the first dispatch fail with a 401.
+      if (h.byok_required && !getApiKey() && !h.demo_mode) setKeyOpen(true);
+    });
+    return () => { alive = false; };
+  }, []);
+
+  const byokRequired = !!health?.byok_required && !health?.demo_mode;
+  const needsKey = byokRequired && !hasKey;
 
   useThemeVars(rootRef, theme, accent);
 
@@ -105,10 +129,14 @@ export default function App() {
         termOpen={termOpen}
         onToggleTerminal={() => setTermOpen((o) => !o)}
         onOpenSecurity={() => setSecOpen(true)}
+        onOpenKey={() => setKeyOpen(true)}
+        hasKey={hasKey}
+        byokRequired={byokRequired}
       />
 
       <main style={{ marginLeft: 72, padding: '104px 48px 120px', maxWidth: 1320 }}>
-        <SessionView visible={view === 'session'} pipeline={pipeline} />
+        <DeploymentBanner health={health} hasKey={hasKey} onOpenKey={() => setKeyOpen(true)} />
+        <SessionView visible={view === 'session'} pipeline={pipeline} needsKey={needsKey} onOpenKey={() => setKeyOpen(true)} health={health} />
         <GraphView visible={view === 'graph'} />
         <RunsView visible={view === 'runs'} state={pipeline.state} />
         <AuditView visible={view === 'audit'} state={pipeline.state} />
@@ -117,6 +145,12 @@ export default function App() {
       <ApprovalBar visible={approvalVisible} onReject={pipeline.reject} onApprove={pipeline.approve} />
       <TerminalDrawer open={termOpen} onClose={() => setTermOpen(false)} lines={pipeline.state.termLines} />
       <SecurityModal open={secOpen} onClose={() => setSecOpen(false)} />
+      <ApiKeyModal
+        open={keyOpen}
+        required={byokRequired}
+        onClose={() => setKeyOpen(false)}
+        onSaved={() => setHasKey(!!getApiKey())}
+      />
     </div>
   );
 }

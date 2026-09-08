@@ -95,6 +95,24 @@ BLOCKED_ATTRIBUTE_CHAINS: frozenset[tuple[str, str]] = frozenset({
     ("pandas", "read_html"), ("pandas", "read_sql"), ("pandas", "read_fwf"),
     ("numpy", "load"), ("numpy", "loadtxt"), ("numpy", "genfromtxt"),
     ("numpy", "fromfile"), ("numpy", "save"), ("numpy", "savetxt"),
+    # Eval-equivalents inside allowlisted libraries. These are the reason an
+    # import allowlist alone is not a sandbox: sympy.sympify() eval()s its
+    # string argument, so
+    #     sympify("__import__('subprocess').check_output(['id'])")
+    # is arbitrary code execution through a "safe" maths import. Verified
+    # returning 'root' before this entry existed. pandas' eval/query use the
+    # same class of string-expression evaluation.
+    ("sympy", "sympify"), ("sympy", "S"), ("sympy", "parse_expr"),
+    ("sympy", "srepr_to_expr"), ("sympy", "simplify_string"),
+    ("pandas", "eval"), ("pandas", "query"),
+})
+
+# Method names that are dangerous on *any* receiver, because we cannot resolve
+# what the receiver is statically. `df.query(...)` / `df.eval(...)` are pandas
+# string-expression evaluators; `.sympify(...)` likewise. Blocking by method
+# name is blunt but fail-closed, which is the correct bias here.
+BLOCKED_METHOD_NAMES: frozenset[str] = frozenset({
+    "sympify", "parse_expr", "eval", "query",
 })
 
 # Severity levels the frontend renders as pass/warn/block chips.
@@ -220,7 +238,9 @@ def analyze_code(source: str) -> SecurityAudit:
         if isinstance(node, ast.ImportFrom) and node.module:
             real = node.module.split(".")[0]
             for a in node.names:
-                if (real, a.name) in BLOCKED_ATTRIBUTE_CHAINS:
+                # `from sympy import sympify` / `from os import system` bind a
+                # bare name that must be refused wherever it is later called.
+                if (real, a.name) in BLOCKED_ATTRIBUTE_CHAINS or a.name in BLOCKED_METHOD_NAMES:
                     blocked_bare_names[a.asname or a.name] = (real, a.name)
 
     saw_dangerous_call = False
@@ -249,6 +269,15 @@ def analyze_code(source: str) -> SecurityAudit:
                     findings.append(Finding(
                         check="Dangerous attribute call",
                         detail=f"call to '{chain[0]}.{chain[1]}(...)' is denied",
+                        severity=BLOCK, line=node.lineno,
+                    ))
+                    saw_dangerous_call = True
+                elif func.attr in BLOCKED_METHOD_NAMES:
+                    # Receiver is unknown statically (e.g. `df.query(...)`), so
+                    # the method name alone is grounds for refusal.
+                    findings.append(Finding(
+                        check="String-eval method",
+                        detail=f"call to '.{func.attr}(...)' is denied (evaluates strings as code)",
                         severity=BLOCK, line=node.lineno,
                     ))
                     saw_dangerous_call = True

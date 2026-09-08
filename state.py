@@ -21,3 +21,8 @@ class MADEState(TypedDict, total=False):
 
     # FAISS retrieval (real RAG) — what documents grounded the Researcher's methodology
     research_sources: List[Dict[str, Any]]    # [{title, snippet, score}, …]
+
+    # True when the sandbox was skipped because MADE_ALLOW_EXECUTION is off
+    # (the default on public deployments). Distinguishes "did not run" from
+    # "ran and passed", which the UI must not conflate.
+    execution_skipped: bool

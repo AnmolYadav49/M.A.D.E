@@ -24,6 +24,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import resource
 import subprocess
 import sys
 import tempfile
@@ -34,6 +35,8 @@ from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage
 from langgraph.graph import StateGraph, END
 
+import config
+from runcontext import current_llm_key, redact
 from state import MADEState
 from security import (
     analyze_code, summarize as security_summarize, strip_markdown_code_fence,
@@ -42,42 +45,54 @@ from security import (
 
 load_dotenv()
 
-MAX_HEAL_ATTEMPTS = int(os.getenv("MADE_MAX_HEAL_ATTEMPTS", "3"))
-SANDBOX_TIMEOUT_SEC = int(os.getenv("MADE_SANDBOX_TIMEOUT_SEC", "10"))
-FAISS_INDEX_DIR = os.getenv("MADE_FAISS_INDEX_DIR", "faiss_index")
-RESEARCH_TOP_K = int(os.getenv("MADE_RESEARCH_TOP_K", "4"))
-DEMO_MODE = os.getenv("MADE_DEMO_MODE", "").strip().lower() in {"1", "true", "yes"}
+MAX_HEAL_ATTEMPTS = config.MAX_HEAL_ATTEMPTS
+SANDBOX_TIMEOUT_SEC = config.SANDBOX_TIMEOUT_SEC
+FAISS_INDEX_DIR = config.FAISS_INDEX_DIR
+RESEARCH_TOP_K = config.RESEARCH_TOP_K
+DEMO_MODE = config.DEMO_MODE
 
 
-_llm = None
+_demo_llm = None
+
+
+class MissingLLMKey(RuntimeError):
+    """Raised when a run has no usable LLM key (public mode, no BYOK header)."""
 
 
 def llm():
-    """Lazy-init the chat model.
+    """Return the chat model for the *current request*.
 
-    Module-level construction used to raise at import time when
-    OPENROUTER_API_KEY was unset, so `from graph import _load_retriever` (used
-    in the smoke test) broke before it could even check the retriever. Deferring
-    the check lets non-LLM code paths — the AST audit, the retriever, and tests
-    of both — import cleanly.
+    In public mode each visitor supplies their own OpenRouter key, so this
+    cannot be a module-level singleton — one client per request, built from the
+    key in the request context. The key is read from a contextvar rather than
+    passed down through every node signature, and is never written into graph
+    state (which is serialised into the API response).
 
     Under MADE_DEMO_MODE the model is replaced by a scripted responder (see
     demo_llm.py). Only the model's *text* is scripted — the graph routing,
     sandbox, AST audit and self-heal loop all still run for real.
     """
-    global _llm
-    if _llm is None:
-        if DEMO_MODE:
+    global _demo_llm
+    if DEMO_MODE:
+        if _demo_llm is None:
             from demo_llm import ScriptedLLM
             logging.warning("--- 🎬 DEMO MODE: using scripted agent responses, NOT live inference ---")
-            _llm = ScriptedLLM()
-        else:
-            _llm = ChatOpenAI(
-                openai_api_base="https://openrouter.ai/api/v1",
-                openai_api_key=os.getenv("OPENROUTER_API_KEY"),
-                model_name=os.getenv("MADE_MODEL_NAME", "openrouter/free"),
-            )
-    return _llm
+            _demo_llm = ScriptedLLM()
+        return _demo_llm
+
+    key = current_llm_key.get() or (None if config.PUBLIC_MODE else config.SERVER_OPENROUTER_KEY)
+    if not key:
+        raise MissingLLMKey(
+            "No LLM key for this request. This deployment runs in public mode, "
+            "so each visitor must supply their own OpenRouter key."
+        )
+    return ChatOpenAI(
+        openai_api_base=config.OPENROUTER_BASE_URL,
+        openai_api_key=key,
+        model_name=config.MODEL_NAME,
+        timeout=90,
+        max_retries=1,
+    )
 
 
 # --------------------------- Researcher (RAG) ---------------------------------
@@ -190,6 +205,46 @@ def coder_node(state: MADEState) -> dict[str, Any]:
 
 # --------------------------- Sandbox executor ---------------------------------
 
+def _sandbox_rlimits() -> None:
+    """Apply hard resource caps in the child, before exec.
+
+    The AST audit cannot be assumed complete — sympy.sympify and pandas.eval
+    were each arbitrary code execution through an allowlisted import until they
+    were specifically named. These limits bound the blast radius of the next
+    such gap rather than relying on having found them all: a bypass gets a
+    CPU-seconds budget, an address-space ceiling, no ability to fork, and no
+    ability to write a large file.
+
+    Runs in the forked child via preexec_fn, so a failure here kills only that
+    child. POSIX only; on platforms without `resource` the caller skips it.
+    """
+    cpu = max(1, SANDBOX_TIMEOUT_SEC)
+    resource.setrlimit(resource.RLIMIT_CPU, (cpu, cpu + 1))
+    mem = config.SANDBOX_MEM_MB * 1024 * 1024
+    resource.setrlimit(resource.RLIMIT_AS, (mem, mem))
+    resource.setrlimit(resource.RLIMIT_FSIZE, (8 * 1024 * 1024, 8 * 1024 * 1024))
+    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+    try:
+        # Blocks fork bombs. Not available everywhere, and harmless if missing.
+        resource.setrlimit(resource.RLIMIT_NPROC, (64, 64))
+    except (ValueError, OSError):
+        pass
+
+
+def _preexec():
+    return _sandbox_rlimits() if hasattr(resource, "setrlimit") else None
+
+
+def _truncate(text: str | None) -> str:
+    """Clamp captured output so one run cannot flood the log stream or response."""
+    if not text:
+        return ""
+    limit = config.SANDBOX_MAX_OUTPUT_BYTES
+    if len(text) <= limit:
+        return text
+    return text[:limit] + f"\n… [truncated at {limit} bytes]"
+
+
 def sandbox_env() -> dict[str, str]:
     """Minimal environment for the sandbox subprocess.
 
@@ -223,6 +278,20 @@ def _classify_failure(returncode: int, stderr: str, timed_out: bool = False) -> 
 
 
 def sandbox_executor_node(state: MADEState) -> dict[str, Any]:
+    # Execution kill-switch. On a public deployment the default is OFF, because
+    # no amount of static analysis makes running a stranger's generated Python
+    # on your own host safe. The rest of the pipeline is unaffected: the code
+    # has already been written and audited, and the Reviewer and HITL gate
+    # still run — only the subprocess is skipped.
+    if not config.ALLOW_EXECUTION:
+        logging.info("--- ⏸️  SANDBOX SKIPPED: execution disabled on this deployment (MADE_ALLOW_EXECUTION=0) ---")
+        return {
+            "execution_output": None,
+            "error_traceback": None,
+            "failure_class": None,
+            "execution_skipped": True,
+        }
+
     logging.info("--- ⚡ SANDBOX EXECUTOR: Running isolated test execution ---")
     clean_code = strip_markdown_code_fence(state.get("generated_code", ""))
 
@@ -233,26 +302,27 @@ def sandbox_executor_node(state: MADEState) -> dict[str, Any]:
         #
         # cwd is an empty throwaway directory so relative paths the model might
         # emit ('.env', 'mock_data.csv') resolve into nothing rather than into
-        # the repo. Combined with sandbox_env() this means a bypass of the AST
-        # audit still lands somewhere with no secrets and no project files.
+        # the repo. Combined with sandbox_env() and the rlimits in _preexec,
+        # a bypass of the AST audit lands somewhere with no secrets, no project
+        # files, a CPU budget and a memory ceiling.
         with tempfile.TemporaryDirectory(prefix="made-sandbox-") as workdir:
             result = subprocess.run(
-                [sys.executable, "-c", clean_code],
+                [sys.executable, "-I", "-c", clean_code],  # -I: isolated mode, ignores PYTHON* env and cwd on sys.path
                 capture_output=True, text=True, timeout=SANDBOX_TIMEOUT_SEC,
-                cwd=workdir, env=sandbox_env(),
+                cwd=workdir, env=sandbox_env(), preexec_fn=_preexec,
             )
         if result.returncode == 0:
             logging.info("--- ✅ SANDBOX SUCCESS: Traceback clean. Routing to Reviewer ---")
-            return {"execution_output": result.stdout, "error_traceback": None, "failure_class": None}
+            return {"execution_output": _truncate(result.stdout), "error_traceback": None, "failure_class": None}
         cls = _classify_failure(result.returncode, result.stderr or "")
         logging.info("--- ❌ SANDBOX FAILED (%s): routing back to Coder for self-healing ---", cls)
-        return {"execution_output": None, "error_traceback": result.stderr, "failure_class": cls}
+        return {"execution_output": None, "error_traceback": _truncate(result.stderr), "failure_class": cls}
     except subprocess.TimeoutExpired:
         logging.info("--- ❌ SANDBOX FAILED (timeout): routing back to Coder for self-healing ---")
         return {"execution_output": None, "error_traceback": f"Execution timed out after {SANDBOX_TIMEOUT_SEC} seconds.", "failure_class": "timeout"}
     except Exception as e:  # subprocess itself blew up, not the child
         logging.info("--- ❌ SANDBOX FAILED (runtime): %s ---", e)
-        return {"execution_output": None, "error_traceback": str(e), "failure_class": "runtime"}
+        return {"execution_output": None, "error_traceback": redact(str(e)), "failure_class": "runtime"}
 
 
 # --------------------------- Policy gate (pre-execution) ----------------------

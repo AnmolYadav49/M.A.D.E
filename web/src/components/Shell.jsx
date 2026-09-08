@@ -7,7 +7,7 @@ const VIEWS = [
   { key: 'audit', label: 'Audit', railIcon: 'shield' },
 ];
 
-export default function Shell({ view, setView, theme, toggleTheme, statusMeta, termOpen, onToggleTerminal, onOpenSecurity }) {
+export default function Shell({ view, setView, theme, toggleTheme, statusMeta, termOpen, onToggleTerminal, onOpenSecurity, onOpenKey, hasKey, byokRequired }) {
   return (
     <>
       <aside style={{ position: 'fixed', top: 0, left: 0, bottom: 0, width: 72, background: 'var(--panel)', borderRight: '1px solid var(--border)', display: 'flex', flexDirection: 'column', alignItems: 'center', padding: '18px 0', gap: 6, zIndex: 60 }}>
@@ -38,6 +38,22 @@ export default function Shell({ view, setView, theme, toggleTheme, statusMeta, t
         </button>
         <button onClick={onOpenSecurity} title="Security clearance" style={{ width: 44, height: 44, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'transparent', border: 'none', cursor: 'pointer' }}>
           <span className="mi" style={{ fontSize: 22, color: 'var(--dim3)' }}>security</span>
+        </button>
+        {/* Key management. Pulses when a public deployment still needs one,
+            since nothing in the app works until it's provided. */}
+        <button
+          onClick={onOpenKey}
+          title={hasKey ? 'Your API key (set)' : 'Enter your own API key'}
+          style={{
+            position: 'relative', width: 44, height: 44, display: 'flex', alignItems: 'center', justifyContent: 'center',
+            background: byokRequired && !hasKey ? 'rgba(176,87,48,.16)' : 'transparent',
+            border: 'none', cursor: 'pointer',
+            animation: byokRequired && !hasKey ? 'blink 2s ease-in-out infinite' : 'none',
+          }}
+        >
+          <span className="mi" style={{ fontSize: 22, color: hasKey ? 'var(--ok)' : byokRequired ? 'var(--accent)' : 'var(--dim3)' }}>
+            {hasKey ? 'key' : 'key_off'}
+          </span>
         </button>
       </aside>
 

@@ -25,6 +25,7 @@ const initialState = {
   reviewerReport: '',
   securityAudit: null,       // { verdict, findings:[…] } from graph.reviewer_node
   researchSources: [],       // [{ title, snippet }] from graph.researcher_node
+  executionSkipped: false,   // true when MADE_ALLOW_EXECUTION is off on this deployment
   subprocessResult: null,
   errorMessage: null,
 };
@@ -92,6 +93,7 @@ export function usePipeline() {
       reviewerReport: '',
       securityAudit: null,
       researchSources: [],
+      executionSkipped: false,
       subprocessResult: null,
       errorMessage: null,
     }));
@@ -116,6 +118,7 @@ export function usePipeline() {
         reviewerReport: data.reviewer_security_report || '',
         securityAudit: data.security_audit || null,
         researchSources: data.research_sources || [],
+        executionSkipped: !!data.execution_skipped,
         logs: [
           ...s.logs,
           ...(data.research_sources && data.research_sources.length

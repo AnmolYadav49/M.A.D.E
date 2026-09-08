@@ -1,0 +1,77 @@
+# Render blueprint for the M.A.D.E. control center.
+#
+# Render (rather than Vercel) because this backend needs three things a
+# serverless platform does not provide:
+#   1. WebSockets — the live pipeline tracker is driven by /ws/logs.
+#   2. Long-lived requests — /execute-task blocks for the whole LangGraph run,
+#      which is several sequential model calls and routinely exceeds 60s.
+#   3. A persistent process — the log subscriber set and rate-limit buckets are
+#      in-process state that a per-invocation function would discard.
+#
+# Deploy: push this file, then in Render choose "New > Blueprint" and point it
+# at the repo. Everything below is public-safe: no secrets live in this file.
+services:
+  - type: web
+    name: made-control-center
+    runtime: python
+    plan: free # free instances sleep after ~15 min idle; first hit takes ~50s
+    region: oregon
+    healthCheckPath: /api/health
+    # No Node step here: the built frontend (frontend/index.html, assets/,
+    # fonts/) is committed, so Render only needs the Python runtime. Rebuild it
+    # locally with `cd web && npm run build` and commit the result before
+    # deploying UI changes.
+    buildCommand: |
+      pip install --upgrade pip
+      pip install -r requirements.txt
+      # The FAISS methodology index is built at deploy time rather than
+      # committed: it is a derived artefact and the embedding model download
+      # is cached by Render between builds.
+      python build_db.py || echo "FAISS index build skipped — researcher will fall back to unguided prompting"
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      # --- deployment posture ---------------------------------------------
+      - key: MADE_PUBLIC_MODE
+        value: "1" # visitors bring their own OpenRouter key
+
+      # Code execution is OFF for public deployments. The pipeline still runs
+      # end to end — research, synthesis, policy audit, review, human gate —
+      # only the sandbox subprocess is skipped.
+      #
+      # Do NOT flip this to "1" on a public URL unless this service itself is
+      # isolated (its own container, non-root, no egress, disposable). The AST
+      # audit is defence in depth, not a sandbox: sympy.sympify and pandas.eval
+      # were each arbitrary code execution through an allowlisted import until
+      # they were specifically found and blocked, and assuming that list is now
+      # complete is the same mistake.
+      - key: MADE_ALLOW_EXECUTION
+        value: "0"
+
+      # --- limits ----------------------------------------------------------
+      - key: MADE_RATE_LIMIT_PER_MIN
+        value: "8"
+      - key: MADE_MAX_TASK_CHARS
+        value: "2000"
+      - key: MADE_MAX_HEAL_ATTEMPTS
+        value: "3"
+      - key: MADE_SANDBOX_TIMEOUT_SEC
+        value: "10"
+      - key: MADE_SANDBOX_MEM_MB
+        value: "512"
+
+      # --- CORS ------------------------------------------------------------
+      # Same-origin only by default: FastAPI serves the built frontend itself,
+      # so no cross-origin access is needed. Add your own domain here if you
+      # front this with one.
+      - key: MADE_ALLOWED_ORIGINS
+        sync: false
+
+      # --- model -----------------------------------------------------------
+      - key: MADE_MODEL_NAME
+        value: openrouter/free
+
+      # Deliberately absent: OPENROUTER_API_KEY. In public mode the server holds
+      # no model key at all — each visitor supplies their own per request, so a
+      # compromise of this service leaks no credential of yours.
+      - key: PYTHON_VERSION
+        value: "3.11.9"
